@@ -43,9 +43,7 @@ mcap:
     - /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose
     - /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states
 
-    # Headerless target fractions and measured Robotiq JointState streams.
-    - /left/gripper/gripper_client/target_gripper_width_percent
-    - /right/gripper/gripper_client/target_gripper_width_percent
+    # Measured Robotiq JointState streams. Gripper target commands are not recorded.
     - /left/gripper/joint_states
     - /right/gripper/joint_states
 

@@ -136,8 +136,8 @@ def test_tmr_config_records_all_four_arm_routes_at_100_hz() -> None:
     assert config.arm_sampling is not None
     assert config.arm_sampling.rate_hz == 100.0
     assert len(config.arm_sampling.routes) == 4
-    assert len(config.topics) == 17
-    assert len(config.recorded_topics) == 18
+    assert len(config.topics) == 15
+    assert len(config.recorded_topics) == 16
     assert {route.source_topic for route in config.arm_sampling.routes}.isdisjoint(config.topics)
     assert {route.recorded_topic for route in config.arm_sampling.routes}.issubset(config.topics)
     for side in ("left", "right"):
