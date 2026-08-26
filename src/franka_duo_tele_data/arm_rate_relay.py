@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rate-limit high-frequency Franka state topics with a typed rclpy relay.
+"""Rate-limit high-frequency Franka and gripper state topics with a typed relay.
 
 The relay discovers each source topic's ROS message type from the live graph,
 then republishes the newest not-yet-forwarded message at most once per timer
@@ -39,9 +39,11 @@ _ARM_STREAMS = (
     "current_pose",
     "measured_joint_states",
 )
-DEFAULT_SOURCE_TOPICS = tuple(
+_DEFAULT_ARM_SOURCE_TOPICS = tuple(
     f"/{side}/{_BROADCASTER}/{stream}" for side in ("left", "right") for stream in _ARM_STREAMS
 )
+_DEFAULT_GRIPPER_SOURCE_TOPICS = tuple(f"/{side}/gripper/joint_states" for side in ("left", "right"))
+DEFAULT_SOURCE_TOPICS = _DEFAULT_ARM_SOURCE_TOPICS + _DEFAULT_GRIPPER_SOURCE_TOPICS
 
 
 class ArmRateRelayError(RuntimeError):
@@ -440,7 +442,7 @@ def _parse_topic_arg(value: str) -> tuple[str, str | None]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Relay the newest Franka arm messages at no more than 100 Hz by default"
+        description="Relay the newest Franka and gripper state messages at no more than 100 Hz by default"
     )
     parser.add_argument(
         "--topic",

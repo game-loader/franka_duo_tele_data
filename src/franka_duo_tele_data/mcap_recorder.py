@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Record operator-delimited ROS 2 episodes as MCAP bags.
 
-Camera, gripper, and TF messages go directly to ``ros2 bag record``.  When arm
-sampling is configured, a supervised typed rclpy relay first caps the four
-high-rate arm streams by forwarding only the latest unseen sample at 100 Hz.
+Camera and TF messages go directly to ``ros2 bag record``.  When arm sampling
+is configured, a supervised typed rclpy relay first caps the four arm streams
+and two gripper state streams by forwarding only the latest unseen sample at
+100 Hz.
 No stream is synchronized, aggregated, normalized, or passed through FK.
 One additional ``std_msgs/msg/String`` topic marks episode start.  On stop,
 rosbag2 is closed before any reward prompt; the end boundary and optional
@@ -61,7 +62,7 @@ class ArmSamplingRoute:
 
 @dataclass(frozen=True, slots=True)
 class ArmSamplingConfig:
-    """Lossy latest-unseen rate cap applied only to the four arm streams."""
+    """Lossy latest-unseen rate cap applied to the six high-rate state streams."""
 
     rate_hz: float
     routes: tuple[ArmSamplingRoute, ...]
@@ -145,8 +146,8 @@ def validate_config(config: McapRecorderConfig) -> None:
         raise ValueError("arm_sampling.rate_hz must be finite and positive") from exc
     if isinstance(sampling.rate_hz, bool) or not math.isfinite(rate_hz) or rate_hz <= 0:
         raise ValueError("arm_sampling.rate_hz must be finite and positive")
-    if len(sampling.routes) != 4:
-        raise ValueError("arm_sampling.routes must contain exactly 4 source-to-recorded routes")
+    if len(sampling.routes) != 6:
+        raise ValueError("arm_sampling.routes must contain exactly 6 source-to-recorded routes")
     sources: list[str] = []
     recorded: list[str] = []
     for index, route in enumerate(sampling.routes):
@@ -600,7 +601,7 @@ def _validate_relay_ready_payload(
 
 
 class ArmRateRelayProcess:
-    """Supervise one arm relay across any number of MCAP episodes."""
+    """Supervise one high-rate state relay across MCAP episodes."""
 
     def __init__(
         self,
@@ -840,7 +841,7 @@ class RawMcapRecorder:
         return self.arm_relay.health_error()
 
     def close(self) -> None:
-        """Stop the session-wide arm relay; safe to call repeatedly."""
+        """Stop the session-wide high-rate relay; safe to call repeatedly."""
 
         if self.arm_relay is None or self.arm_relay.process is None:
             return

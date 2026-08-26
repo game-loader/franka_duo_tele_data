@@ -60,7 +60,7 @@ def _sampling() -> ArmSamplingConfig:
             recorded_topic=f"/rate100/{side}/{index}",
         )
         for side in ("left", "right")
-        for index in range(2)
+        for index in range(3)
     )
     return ArmSamplingConfig(rate_hz=100.0, routes=routes)
 
@@ -130,12 +130,12 @@ def _successful_run(_argv, **_kwargs):
     return SimpleNamespace(returncode=0, stdout="", stderr="")
 
 
-def test_tmr_config_records_all_four_arm_routes_at_100_hz() -> None:
+def test_tmr_config_records_all_six_high_rate_routes_at_100_hz() -> None:
     config = load_config(REPO_ROOT / "configs" / "tmr_mcap.yaml")
 
     assert config.arm_sampling is not None
     assert config.arm_sampling.rate_hz == 100.0
-    assert len(config.arm_sampling.routes) == 4
+    assert len(config.arm_sampling.routes) == 6
     assert len(config.topics) == 15
     assert len(config.recorded_topics) == 16
     assert {route.source_topic for route in config.arm_sampling.routes}.isdisjoint(config.topics)
@@ -148,6 +148,14 @@ def test_tmr_config_records_all_four_arm_routes_at_100_hz() -> None:
             source = f"/{side}/franka_robot_state_broadcaster/{stream}"
             destination = f"/franka_duo_tele_data/rate100{source}"
             assert ArmSamplingRoute(source, destination) in config.arm_sampling.routes
+        gripper_source = f"/{side}/gripper/joint_states"
+        assert (
+            ArmSamplingRoute(
+                gripper_source,
+                f"/franka_duo_tele_data/rate100{gripper_source}",
+            )
+            in config.arm_sampling.routes
+        )
 
 
 @pytest.mark.parametrize("case", ("duplicate_source", "missing_output", "direct_source", "bad_rate"))
@@ -193,7 +201,7 @@ def test_relay_supervisor_requires_ready_handshake_and_stops_cleanly(tmp_path: P
     assert supervisor.start()["status"] == "ready"
     assert popen_calls[0][1]["stdin"] == subprocess.DEVNULL
     assert popen_calls[0][1]["start_new_session"] is True
-    assert popen_calls[0][0].count("--topic") == 4
+    assert popen_calls[0][0].count("--topic") == 6
     assert supervisor.stop() == 0
     assert process.signals == [signal.SIGINT]
     assert not ready_file.exists()

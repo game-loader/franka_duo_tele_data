@@ -24,12 +24,14 @@ from franka_duo_tele_data.arm_rate_relay import (
 )
 
 
-def test_default_sources_cover_two_streams_for_both_arms() -> None:
+def test_default_sources_cover_arm_and_gripper_streams() -> None:
     assert DEFAULT_SOURCE_TOPICS == (
         "/left/franka_robot_state_broadcaster/current_pose",
         "/left/franka_robot_state_broadcaster/measured_joint_states",
         "/right/franka_robot_state_broadcaster/current_pose",
         "/right/franka_robot_state_broadcaster/measured_joint_states",
+        "/left/gripper/joint_states",
+        "/right/gripper/joint_states",
     )
 
 

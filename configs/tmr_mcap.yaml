@@ -2,15 +2,16 @@
 #
 # The recorder hard-fixes rosbag2 storage to MCAP and the storage preset to
 # zstd_fast. Neither setting is configurable from this file. Every listed ROS
-# camera/gripper/TF message is serialized directly by rosbag2. The four arm
-# streams below are the only exception: an automatically supervised relay caps
-# them at 100 Hz before rosbag2 records the relay destinations. There is still
-# no image decoding, synchronization, action/state aggregation, or conversion.
+# camera/TF message is serialized directly by rosbag2. The four arm streams and
+# two gripper state streams below are the only exception: an automatically
+# supervised relay caps them at 100 Hz before rosbag2 records the destinations.
+# There is still no image decoding, synchronization, action/state aggregation,
+# or conversion.
 dataset_name: franka_duo_tmr_raw
 output_root: datasets/franka_duo_mcap
 max_episodes: 100
 
-# Explicit source -> recorded relay contract for the four arm streams. On
+# Explicit source -> recorded relay contract for six high-rate state streams. On
 # each 10 ms tick the relay publishes only the newest message not published on
 # an earlier tick; it never duplicates a stale sample.
 arm_sampling:
@@ -24,6 +25,10 @@ arm_sampling:
       recorded_topic: /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose
     - source_topic: /right/franka_robot_state_broadcaster/measured_joint_states
       recorded_topic: /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states
+    - source_topic: /left/gripper/joint_states
+      recorded_topic: /franka_duo_tele_data/rate100/left/gripper/joint_states
+    - source_topic: /right/gripper/joint_states
+      recorded_topic: /franka_duo_tele_data/rate100/right/gripper/joint_states
 
 mcap:
   # Normal recording is reward-free; run_manual_recorder.sh overrides this to
@@ -36,16 +41,15 @@ mcap:
   shutdown_timeout_s: 30.0
 
   topics:
-    # Record only relay destinations for arm data. Never add the four source
-    # topics here, or the intended 100 Hz storage cap would be bypassed.
+    # Record only relay destinations for arm and gripper state data. Never add
+    # the six source topics here, or the intended 100 Hz storage cap is bypassed.
     - /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/current_pose
     - /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/measured_joint_states
     - /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose
     - /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states
 
-    # Measured Robotiq JointState streams. Gripper target commands are not recorded.
-    - /left/gripper/joint_states
-    - /right/gripper/joint_states
+    - /franka_duo_tele_data/rate100/left/gripper/joint_states
+    - /franka_duo_tele_data/rate100/right/gripper/joint_states
 
     # ZED-M rectified RGB, registered depth, and matching RGB intrinsics.
     - /head_camera/zed/rgb/color/rect/image

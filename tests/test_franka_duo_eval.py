@@ -386,6 +386,13 @@ def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
             "measured_joint_states",
         )
     ]
+    for side in ("left", "right"):
+        routes.append(
+            {
+                "source_topic": f"/{side}/gripper/joint_states",
+                "recorded_topic": f"/franka_duo_tele_data/rate100/{side}/gripper/joint_states",
+            }
+        )
     raw_config = tmp_path / "raw_mcap.yaml"
     raw_config.write_text(
         yaml.safe_dump(
@@ -418,7 +425,7 @@ def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
 
     assert capture.arm_sampling is not None
     assert capture.arm_sampling.rate_hz == 100.0
-    assert len(capture.arm_sampling.routes) == 4
+    assert len(capture.arm_sampling.routes) == 6
     assert capture.topics[-1] == "/franka_duo/eval/action_trace"
 
 
