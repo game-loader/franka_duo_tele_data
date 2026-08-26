@@ -29,8 +29,8 @@ cameras:
     image: /head_camera/zed/rgb/color/rect/image
     depth: /head_camera/zed/depth/depth_registered
     camera_info: /head_camera/zed/rgb/color/rect/camera_info
-    width: 1280
-    height: 720
+    width: 640
+    height: 360
     fps: 15
     depth_scale: 0.001
     depth_registered: true

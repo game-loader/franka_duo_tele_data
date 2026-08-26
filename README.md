@@ -57,8 +57,8 @@ rosbag2；end 边界、outcome 和可选 reward 随后写入 bag 外的 dataset/
 |---|---|
 | 4 路双臂流 | 只录下节列出的 `/franka_duo_tele_data/rate100/...` relay 输出 |
 | 左右夹爪实际状态 | 只录 `/franka_duo_tele_data/rate100/left/gripper/joint_states` 和右侧同名输出 |
-| ZED-M RGB | `/head_camera/zed/rgb/color/rect/image` |
-| ZED-M registered depth | `/head_camera/zed/depth/depth_registered` |
+| ZED-M RGB | `/head_camera/zed/rgb/color/rect/image` (`640x360`) |
+| ZED-M registered depth | `/head_camera/zed/depth/depth_registered` (`640x360`) |
 | ZED-M CameraInfo | `/head_camera/zed/rgb/color/rect/camera_info` |
 | 双 D405 RGB | `/wrist_camera_left/color/image_raw`、右侧同名 topic |
 | 双 D405 CameraInfo | `/wrist_camera_left/color/camera_info`、右侧同名 topic |
@@ -92,7 +92,8 @@ D405 depth 明确不录。`/tf` 和 `/tf_static` 用于保留可能存在的离�
 不保证现场发布了完整且正确标定的 head-optical 到 robot-base 树。录后必须检查 bag 中的
 TF；缺失时使用单独标定的静态外参，不能把 camera-frame 点云称为 base/world 点云。
 
-当前 ZED 通常约 14-15 Hz，D405 driver 当前是 `640x480@30`。MCAP 保留各自原始频率，
+当前 ZED RGB 和 registered depth 配置为 `640x360@15`；D405 driver 当前是 `640x480@30`。
+MCAP 保留各自原始频率，
 不会把 wrist 降成“逻辑 15 FPS”。如果现场改 D405 为 `480x270@30`，只修改 driver；原始
 recorder 不做尺寸假设，CameraInfo 和图像会原样进入 bag。
 

@@ -85,6 +85,14 @@ def test_rot6d_contract_matches_rl100_rows():
     np.testing.assert_allclose(rot6d_to_matrix(six), matrix, atol=1e-6)
 
 
+def test_tmr_eval_config_uses_current_zed_resolution():
+    config = load_eval_config(Path(__file__).resolve().parents[1] / "configs" / "tmr_eval.yaml")
+
+    assert config.cameras["head"].width == 640
+    assert config.cameras["head"].height == 360
+    assert config.cameras["head"].fps == 15
+
+
 def test_action_spec_rejects_bad_rotation_and_workspace():
     spec = FrankaDuoActionSpec(workspace_min=(-1.0, -1.0, 0.0), workspace_max=(1.0, 1.0, 1.0))
     action = np.zeros(ACTION_DIM, dtype=np.float32)
