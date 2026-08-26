@@ -533,11 +533,11 @@ def run(args: argparse.Namespace) -> int:
             steps += 1
         end_requested_unix_ns = time.time_ns()
         reward = getattr(args, "reward", None)
-        if bool(getattr(args, "prompt_reward", False)):
-            reward = prompt_reward()
+        reward_provider = prompt_reward if bool(getattr(args, "prompt_reward", False)) else None
         path = mcap_recorder.save_episode(
             reward,
             requested_unix_ns=end_requested_unix_ns,
+            reward_provider=reward_provider,
         )
         LOGGER.info("Saved eval MCAP episode to %s", path)
     except KeyboardInterrupt:

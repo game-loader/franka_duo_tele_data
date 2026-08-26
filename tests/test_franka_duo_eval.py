@@ -408,11 +408,14 @@ class _FakeEvalMcapRecorder:
         self.__class__.lifecycle.append("mcap_start")
         self.active = SimpleNamespace(index=0)
 
-    def save_episode(self, reward, *, requested_unix_ns=None):
+    def save_episode(self, reward, *, requested_unix_ns=None, reward_provider=None):
+        self.__class__.lifecycle.append("mcap_stop")
+        self.active = None
+        if reward_provider is not None:
+            reward = reward_provider()
         self.__class__.lifecycle.append("mcap_save")
         self.saved_rewards.append(reward)
         self.saved_requested_unix_ns.append(requested_unix_ns)
-        self.active = None
         return self.dataset_path / "episode_000000"
 
     def preserve_interrupted_episode(self, *, reason):
@@ -557,7 +560,13 @@ def _install_fake_eval_runtime(monkeypatch, tmp_path: Path, *, reader_error=None
 
 def test_eval_automatically_records_one_complete_episode_with_prompted_reward(monkeypatch, tmp_path):
     eval_config, bundle, node, rclpy = _install_fake_eval_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(eval_franka_duo, "prompt_reward", lambda: 4.25)
+
+    def prompt_after_stop() -> float:
+        assert _FakeEvalMcapRecorder.instances[0].active is None
+        _FakeEvalMcapRecorder.lifecycle.append("reward_prompt")
+        return 4.25
+
+    monkeypatch.setattr(eval_franka_duo, "prompt_reward", prompt_after_stop)
 
     assert eval_franka_duo.run(_eval_args(eval_config, prompt_reward=True)) == 0
 
@@ -567,7 +576,13 @@ def test_eval_automatically_records_one_complete_episode_with_prompted_reward(mo
     assert len(recorder.saved_requested_unix_ns) == 1
     assert recorder.saved_requested_unix_ns[0] is not None
     assert recorder.preserved_reasons == []
-    assert _FakeEvalMcapRecorder.lifecycle == ["mcap_start", "reader_next", "mcap_save"]
+    assert _FakeEvalMcapRecorder.lifecycle == [
+        "mcap_start",
+        "reader_next",
+        "mcap_stop",
+        "reward_prompt",
+        "mcap_save",
+    ]
     assert len(node.publishers["/eval/action_trace"].messages) == 1
     trace = json.loads(node.publishers["/eval/action_trace"].messages[0].data)
     assert trace["action"] == [0.0] * 20

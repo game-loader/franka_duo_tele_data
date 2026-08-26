@@ -4,8 +4,9 @@
 The recorder deliberately delegates message discovery, serialization, receipt
 timestamps, and storage to ``ros2 bag record``.  Python never subscribes to,
 decodes, synchronizes, resamples, or aggregates robot and camera messages.
-Only one additional ``std_msgs/msg/String`` topic is published for episode
-boundary and optional reward annotations.
+Only one additional ``std_msgs/msg/String`` topic is published for the episode
+start marker. On stop, rosbag2 is closed before any reward prompt; the end
+boundary and optional reward are then written to sidecar manifests.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ EVENT_MESSAGE_TYPE = "std_msgs/msg/String"
 DEFAULT_EVENT_TOPIC = "/franka_duo_tele_data/episode_event"
 DATASET_MANIFEST_NAME = "mcap_dataset_manifest.json"
 EPISODE_MANIFEST_NAME = "episode_manifest.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class McapRecorderError(RuntimeError):
@@ -63,7 +64,7 @@ class McapRecorderConfig:
 
     @property
     def recorded_topics(self) -> tuple[str, ...]:
-        """Return raw topics plus the recorder-owned metadata event topic."""
+        """Return raw topics plus the recorder-owned start-event topic."""
 
         return _deduplicate((*self.topics, self.event_topic))
 
@@ -436,6 +437,9 @@ class RawMcapRecorder:
                 "online_synchronization": False,
                 "online_resampling": False,
                 "online_aggregation": False,
+                "recording_stop_before_reward": True,
+                "reward_storage": "sidecar_manifest_only",
+                "metadata_event_scope": "start_only",
             },
             "episodes": [],
         }
@@ -520,43 +524,45 @@ class RawMcapRecorder:
         outcome: str,
         requested_unix_ns: int | None,
         reward: float | None,
+        reward_provider: Callable[[], float] | None,
         retain: bool,
         intended_complete: bool,
     ) -> Path | None:
         active = self.active
         if active is None:
             raise McapRecorderError("No episode is recording")
+        if reward is not None and reward_provider is not None:
+            raise ValueError("Provide either reward or reward_provider, not both")
         if reward is not None:
             reward = float(reward)
             if not math.isfinite(reward):
                 raise ValueError("reward must be finite")
-        if intended_complete and self.config.rewarded and reward is None:
+        if intended_complete and self.config.rewarded and reward is None and reward_provider is None:
             raise ValueError("A finite reward is required before saving this episode")
 
         end_requested = requested_unix_ns if requested_unix_ns is not None else self._time_ns()
-        end_event_time = self._time_ns()
-        event_error: BaseException | None = None
-        try:
-            self._publish(
-                build_event_payload(
-                    "end",
-                    dataset_name=self.config.dataset_name,
-                    dataset_version=self.dataset_version,
-                    episode_index=active.index,
-                    event_unix_ns=end_event_time,
-                    requested_unix_ns=end_requested,
-                    reward=reward,
-                    outcome=outcome,
-                )
-            )
-        except BaseException as exc:
-            event_error = exc
-        finally:
-            returncode = stop_process_gracefully(active.process, timeout_s=self.config.shutdown_timeout_s)
-            self.active = None
-
+        returncode = stop_process_gracefully(active.process, timeout_s=self.config.shutdown_timeout_s)
+        recording_stopped_unix_ns = self._time_ns()
+        self.active = None
+        LOGGER.info("Stopped raw capture for episode %d before reward handling", active.index)
         process_ok = returncode in (0, -signal.SIGINT)
-        complete = intended_complete and event_error is None and process_ok and active.path.is_dir()
+        reward_error: BaseException | None = None
+        reward_recorded_unix_ns: int | None = None
+        if intended_complete and process_ok and active.path.is_dir() and reward_provider is not None:
+            try:
+                reward = float(reward_provider())
+                if not math.isfinite(reward):
+                    raise ValueError("reward must be finite")
+                reward_recorded_unix_ns = self._time_ns()
+            except BaseException as exc:
+                reward_error = exc
+                outcome = "reward_input_error"
+                intended_complete = False
+                retain = True
+        elif reward is not None:
+            reward_recorded_unix_ns = self._time_ns()
+
+        complete = intended_complete and reward_error is None and process_ok and active.path.is_dir()
         status = "complete" if complete else "incomplete"
         episode_manifest = {
             "schema_version": SCHEMA_VERSION,
@@ -570,19 +576,20 @@ class RawMcapRecorder:
             "start_requested_unix_ns": active.start_requested_unix_ns,
             "start_event_unix_ns": active.start_event_unix_ns,
             "end_requested_unix_ns": end_requested,
-            "end_event_unix_ns": end_event_time,
+            "recording_stopped_unix_ns": recording_stopped_unix_ns,
+            "reward_recorded_unix_ns": reward_recorded_unix_ns,
             "rosbag_exit_code": returncode,
-            "metadata_event_error": str(event_error) if event_error is not None else None,
+            "reward_error": str(reward_error) if reward_error is not None else None,
             "topics": list(self.config.topics),
             "metadata_event_topic": self.config.event_topic,
+            "metadata_events_recorded": ["start"],
+            "reward_storage": "episode_manifest",
             "record_command": list(active.command),
         }
 
         if not retain:
             shutil.rmtree(active.path, ignore_errors=True)
             self._next_episode_index += 1
-            if event_error is not None:
-                raise McapRecorderError(f"Discarded episode event failed: {event_error}") from event_error
             if not process_ok:
                 raise McapRecorderError(f"ros2 bag record exited with code {returncode}")
             return None
@@ -602,10 +609,8 @@ class RawMcapRecorder:
         self._next_episode_index += 1
         if complete:
             self.saved_episodes += 1
-        if event_error is not None:
-            raise McapRecorderError(
-                f"Episode retained as incomplete because its end event failed: {event_error}"
-            ) from event_error
+        if reward_error is not None:
+            raise reward_error
         if not process_ok:
             raise McapRecorderError(
                 f"Episode retained as incomplete because ros2 bag record exited with code {returncode}"
@@ -619,11 +624,13 @@ class RawMcapRecorder:
         reward: float | None,
         *,
         requested_unix_ns: int | None = None,
+        reward_provider: Callable[[], float] | None = None,
     ) -> Path:
         path = self._finish_active(
             outcome="saved",
             requested_unix_ns=requested_unix_ns,
             reward=reward,
+            reward_provider=reward_provider,
             retain=True,
             intended_complete=True,
         )
@@ -635,6 +642,7 @@ class RawMcapRecorder:
             outcome=reason,
             requested_unix_ns=requested_unix_ns,
             reward=None,
+            reward_provider=None,
             retain=False,
             intended_complete=False,
         )
@@ -644,6 +652,7 @@ class RawMcapRecorder:
             outcome=reason,
             requested_unix_ns=self._time_ns(),
             reward=None,
+            reward_provider=None,
             retain=True,
             intended_complete=False,
         )
@@ -712,7 +721,7 @@ def _parser() -> argparse.ArgumentParser:
         "--rewarded",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Prompt for one finite episode reward before publishing the end event",
+        help="Stop rosbag2 first, then prompt for a finite reward stored in the sidecar manifest",
     )
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser
@@ -747,6 +756,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         with TerminalKeys() as keyboard:
+
+            def prompt_in_cooked_mode() -> float:
+                with keyboard.cooked():
+                    return prompt_reward()
+
             quit_requested = False
             while recorder.saved_episodes < config.max_episodes and not quit_requested:
                 key = keyboard.read()
@@ -761,11 +775,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     continue
 
                 if key in {"e", "s"}:
-                    reward = None
-                    if config.rewarded:
-                        with keyboard.cooked():
-                            reward = prompt_reward()
-                    path = recorder.save_episode(reward, requested_unix_ns=requested_unix_ns)
+                    reward_provider = prompt_in_cooked_mode if config.rewarded else None
+                    path = recorder.save_episode(
+                        None,
+                        requested_unix_ns=requested_unix_ns,
+                        reward_provider=reward_provider,
+                    )
                     LOGGER.info("Saved episode to %s", path)
                 elif key == "d":
                     recorder.discard_episode(requested_unix_ns=requested_unix_ns)

@@ -36,9 +36,9 @@ rosbag2 为每条消息保留 bag 的接收/记录时间；消息 payload 内原
 timestamp，并在派生数据 manifest 中明确记录该事实。MCAP 本身不宣称不同 topic 已同步。
 
 Python 只额外发布 `/franka_duo_tele_data/episode_event`，消息类型为
-`std_msgs/msg/String`，JSON payload 标记 start/end、episode index、outcome 和可选 reward。
-该 topic 与 bag 外的 dataset/episode manifest 都只是元数据，不代替传感器 timestamp，
-也不改变机器人原始消息。
+`std_msgs/msg/String`，JSON payload 在 MCAP 内标记 episode start。按下结束键时会先立即停止
+rosbag2；end 边界、outcome 和可选 reward 随后写入 bag 外的 dataset/episode manifest。
+这些元数据不代替传感器 timestamp，也不改变机器人原始消息。
 
 ## TMR 默认原始 Topic
 
@@ -179,8 +179,10 @@ serial 的物理左右映射；旧指南曾出现相反的 serial 文字记录�
 ```
 
 两个脚本都调用同一个 `franka-duo-mcap-record`：空闲时 `r` 开始；录制中 `e` 或 `s`
-结束保存，`d` 丢弃，`q` 丢弃并退出。manual 脚本结束时会恢复终端行输入并要求有限标量
-reward；reward 写入 end event 和 episode manifest，不写进任何机器人消息。
+结束保存，`d` 丢弃，`q` 丢弃并退出。按 `e/s` 后会先发送 SIGINT，等待 rosbag2 完成 MCAP
+封包，再由 manual 脚本恢复终端行输入并要求有限标量 reward；因此输入 reward 期间不会继续
+获取新数据。reward 只写入 episode/dataset manifest，不写进 MCAP 或任何机器人消息。输入后
+回到空闲状态，再按 `r` 即可开始下一个 episode。
 
 默认输出：
 
@@ -202,8 +204,9 @@ datasets/franka_duo_mcap/franka_duo_tmr_raw_vN/
 ros2 bag info datasets/franka_duo_mcap/franka_duo_tmr_raw_v1/episode_000000
 ```
 
-核对 storage id、duration、每个配置 topic 的 message count、`episode_event` start/end 以及
-`/tf_static` 是否真的有消息。配置列出 topic 不代表 publisher 一定存在；rosbag2 允许某个
+核对 storage id、duration、每个配置 topic 的 message count、`episode_event` start、manifest
+中的 end/reward，以及 `/tf_static` 是否真的有消息。配置列出 topic 不代表 publisher 一定
+存在；rosbag2 允许某个
 topic 最终 count 为零，正式数据必须在离线验收时拒绝这种 episode。
 
 可用环境变量切换版本化配置：
@@ -220,7 +223,7 @@ FRANKA_MCAP_CONFIG="$PWD/configs/my_site_mcap.yaml" ./scripts/run_recorder.sh
 
 1. 读取 rosbag receipt timestamp 和原消息 `header.stamp`，验证每个 required topic 数量、
    时间单调性、消息类型、尺寸和 CameraInfo；
-2. 按 `episode_event`/manifest 验证 episode 边界、outcome/reward，不把事件时间当图像时间；
+2. 用 `episode_event` 验证 start，用 manifest 验证 end/outcome/reward，不把元数据时间当图像时间；
 3. 用新的 head RGB header stamp 作为目标帧，按明确阈值匹配 registered depth、左右 wrist、
    measured/desired arm；headerless gripper target 使用 receipt timestamp；
 4. 生成下述 16D action/state，记录每个派生帧对应的所有 source timestamp 和 skew；
@@ -299,9 +302,9 @@ FRANKA_LEROBOT_POLICY=1 \
   --manifest /path/to/manifest.json --device cuda --once
 ```
 
-需要把有限 episode reward 写入 eval 的 end event/manifest 时，使用
-`--prompt-reward`；也可用 `--reward VALUE` 做非交互测试。reward 输入期间 bag 仍保持运行，
-但 end event 的 `requested_unix_ns` 固定为最后一步推理结束时刻，因此后处理可去掉输入耗时：
+需要把有限 episode reward 写入 eval manifest 时，使用 `--prompt-reward`；也可用
+`--reward VALUE` 做非交互测试。eval 完成最后一步后会先停止并封包 MCAP，再提示输入 reward，
+因此输入耗时和期间的传感器消息不会进入该 episode：
 
 ```bash
 ./scripts/run_eval.sh /path/to/franka_eval_bundle --device cuda \

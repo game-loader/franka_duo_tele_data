@@ -169,7 +169,7 @@ def test_allocate_dataset_version_never_reuses_lower_gaps(tmp_path: Path) -> Non
     assert path.name == "demo_v4"
 
 
-def test_episode_records_events_saves_manifests_and_stops_with_sigint(tmp_path: Path) -> None:
+def test_episode_stops_before_reward_and_saves_sidecar_manifest(tmp_path: Path) -> None:
     run_calls: list[list[str]] = []
     popen_calls: list[tuple[list[str], dict]] = []
     processes: list[FakeProcess] = []
@@ -182,7 +182,7 @@ def test_episode_records_events_saves_manifests_and_stops_with_sigint(tmp_path: 
         processes.append(process)
         return process
 
-    ticks = iter([100, 110, 120, 130, 140])
+    ticks = iter([100, 110, 120, 130])
     recorder = RawMcapRecorder(
         _config(tmp_path),
         "/usr/bin/ros2",
@@ -191,7 +191,17 @@ def test_episode_records_events_saves_manifests_and_stops_with_sigint(tmp_path: 
         time_ns_fn=lambda: next(ticks),
     )
     recorder.start_episode(requested_unix_ns=105)
-    episode_path = recorder.save_episode(2.5, requested_unix_ns=125)
+
+    def reward_after_stop() -> float:
+        assert processes[0].signals == [signal.SIGINT]
+        assert recorder.active is None
+        return 2.5
+
+    episode_path = recorder.save_episode(
+        None,
+        requested_unix_ns=125,
+        reward_provider=reward_after_stop,
+    )
 
     assert popen_calls[0][1]["stdin"] == subprocess.DEVNULL
     assert popen_calls[0][1]["start_new_session"] is True
@@ -201,13 +211,16 @@ def test_episode_records_events_saves_manifests_and_stops_with_sigint(tmp_path: 
     assert processes[0].signals == [signal.SIGINT]
 
     event_payloads = [json.loads(json.loads(call[6])["data"]) for call in run_calls]
-    assert [payload["event"] for payload in event_payloads] == ["start", "end"]
-    assert event_payloads[1]["reward"] == 2.5
-    assert event_payloads[1]["requested_unix_ns"] == 125
+    assert [payload["event"] for payload in event_payloads] == ["start"]
 
     episode_manifest = json.loads((episode_path / EPISODE_MANIFEST_NAME).read_text())
     assert episode_manifest["status"] == "complete"
     assert episode_manifest["reward"] == 2.5
+    assert episode_manifest["end_requested_unix_ns"] == 125
+    assert episode_manifest["recording_stopped_unix_ns"] == 120
+    assert episode_manifest["reward_recorded_unix_ns"] == 130
+    assert episode_manifest["metadata_events_recorded"] == ["start"]
+    assert episode_manifest["reward_storage"] == "episode_manifest"
     assert episode_manifest["topics"] == ["/left/measured", "/head/rgb", "/head/depth"]
 
     dataset_manifest = json.loads((recorder.dataset_path / DATASET_MANIFEST_NAME).read_text())
@@ -218,11 +231,14 @@ def test_episode_records_events_saves_manifests_and_stops_with_sigint(tmp_path: 
         "online_synchronization": False,
         "online_resampling": False,
         "online_aggregation": False,
+        "recording_stop_before_reward": True,
+        "reward_storage": "sidecar_manifest_only",
+        "metadata_event_scope": "start_only",
     }
     assert dataset_manifest["episodes"][0]["status"] == "complete"
 
 
-def test_discard_still_publishes_end_event_then_removes_bag(tmp_path: Path) -> None:
+def test_discard_stops_immediately_and_removes_bag(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
     def popen(argv, **_kwargs):
@@ -239,9 +255,61 @@ def test_discard_still_publishes_end_event_then_removes_bag(tmp_path: Path) -> N
     recorder.discard_episode(reason="operator_discard")
 
     assert not active.path.exists()
-    end_payload = json.loads(json.loads(calls[-1][6])["data"])
-    assert end_payload["event"] == "end"
-    assert end_payload["outcome"] == "operator_discard"
+    event_payloads = [json.loads(json.loads(call[6])["data"]) for call in calls]
+    assert [payload["event"] for payload in event_payloads] == ["start"]
+
+
+def test_reward_input_error_keeps_stopped_episode_incomplete(tmp_path: Path) -> None:
+    process = FakeProcess()
+
+    def popen(argv, **_kwargs):
+        Path(argv[argv.index("--output") + 1]).mkdir()
+        return process
+
+    recorder = RawMcapRecorder(
+        _config(tmp_path),
+        "ros2",
+        popen_factory=popen,
+        run_fn=_successful_run([]),
+    )
+    recorder.start_episode()
+
+    def interrupted_reward() -> float:
+        assert process.signals == [signal.SIGINT]
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        recorder.save_episode(None, reward_provider=interrupted_reward)
+
+    episode_path = recorder.dataset_path / "episode_000000"
+    manifest = json.loads((episode_path / EPISODE_MANIFEST_NAME).read_text())
+    assert recorder.active is None
+    assert manifest["status"] == "incomplete"
+    assert manifest["outcome"] == "reward_input_error"
+    assert manifest["reward"] is None
+
+
+def test_rewarded_save_returns_idle_and_allows_next_episode(tmp_path: Path) -> None:
+    def popen(argv, **_kwargs):
+        Path(argv[argv.index("--output") + 1]).mkdir()
+        return FakeProcess()
+
+    recorder = RawMcapRecorder(
+        _config(tmp_path),
+        "ros2",
+        popen_factory=popen,
+        run_fn=_successful_run([]),
+    )
+
+    first = recorder.start_episode()
+    recorder.save_episode(None, reward_provider=lambda: 1.0)
+    assert first.index == 0
+    assert recorder.active is None
+
+    second = recorder.start_episode()
+    assert second.index == 1
+    assert second.path.name == "episode_000001"
+    recorder.discard_episode()
 
 
 def test_reward_parser_rejects_non_finite_values() -> None:

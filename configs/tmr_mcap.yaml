@@ -10,7 +10,8 @@ max_episodes: 100
 
 mcap:
   # Normal recording is reward-free; run_manual_recorder.sh overrides this to
-  # true and stores the operator reward in the end metadata event/manifest.
+  # true. rosbag2 stops before prompting; reward is stored in the sidecar
+  # manifest and no reward-entry delay is captured in the MCAP.
   rewarded: false
   event_topic: /franka_duo_tele_data/episode_event
   startup_timeout_s: 15.0
