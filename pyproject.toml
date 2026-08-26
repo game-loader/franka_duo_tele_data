@@ -27,6 +27,7 @@ source = "https://github.com/game-loader/franka_duo_tele_data"
 issues = "https://github.com/game-loader/franka_duo_tele_data/issues"
 
 [project.scripts]
+franka-duo-arm-rate-relay = "franka_duo_tele_data.arm_rate_relay:main"
 franka-duo-mcap-record = "franka_duo_tele_data.mcap_recorder:main"
 franka-duo-eval = "franka_duo_tele_data.eval_franka_duo:main"
 franka-duo-export-bundle = "franka_duo_tele_data.export_rl100_eval_bundle:main"

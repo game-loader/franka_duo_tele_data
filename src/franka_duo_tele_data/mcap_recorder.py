@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Record operator-delimited ROS 2 episodes as unmodified MCAP bags.
+"""Record operator-delimited ROS 2 episodes as MCAP bags.
 
-The recorder deliberately delegates message discovery, serialization, receipt
-timestamps, and storage to ``ros2 bag record``.  Python never subscribes to,
-decodes, synchronizes, resamples, or aggregates robot and camera messages.
-Only one additional ``std_msgs/msg/String`` topic is published for the episode
-start marker. On stop, rosbag2 is closed before any reward prompt; the end
-boundary and optional reward are then written to sidecar manifests.
+Camera, gripper, and TF messages go directly to ``ros2 bag record``.  When arm
+sampling is configured, a supervised typed rclpy relay first caps the eight
+high-rate arm streams by forwarding only the latest unseen sample at 100 Hz.
+No stream is synchronized, aggregated, normalized, or passed through FK.
+One additional ``std_msgs/msg/String`` topic marks episode start.  On stop,
+rosbag2 is closed before any reward prompt; the end boundary and optional
+reward are then written to sidecar manifests.
 """
 
 from __future__ import annotations
@@ -41,11 +42,29 @@ EVENT_MESSAGE_TYPE = "std_msgs/msg/String"
 DEFAULT_EVENT_TOPIC = "/franka_duo_tele_data/episode_event"
 DATASET_MANIFEST_NAME = "mcap_dataset_manifest.json"
 EPISODE_MANIFEST_NAME = "episode_manifest.json"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+ARM_RELAY_MODULE = "franka_duo_tele_data.arm_rate_relay"
+ARM_RELAY_READY_NAME = ".arm_rate_relay.ready.json"
 
 
 class McapRecorderError(RuntimeError):
     """Raised when raw MCAP capture cannot meet its recording contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArmSamplingRoute:
+    """One high-rate arm source and its recorder-only relay destination."""
+
+    source_topic: str
+    recorded_topic: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArmSamplingConfig:
+    """Lossy latest-unseen rate cap applied only to the eight arm streams."""
+
+    rate_hz: float
+    routes: tuple[ArmSamplingRoute, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +80,7 @@ class McapRecorderConfig:
     startup_timeout_s: float = 15.0
     metadata_publish_timeout_s: float = 15.0
     shutdown_timeout_s: float = 30.0
+    arm_sampling: ArmSamplingConfig | None = None
 
     @property
     def recorded_topics(self) -> tuple[str, ...]:
@@ -84,8 +104,16 @@ def _deduplicate(values: Sequence[str]) -> tuple[str, ...]:
 
 
 def _require_topic_name(value: Any, *, field: str) -> str:
-    if not isinstance(value, str) or not value.startswith("/") or any(char.isspace() for char in value):
-        raise ValueError(f"{field} must be an absolute ROS topic name without whitespace")
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or value == "/"
+        or value.endswith("/")
+        or "//" in value
+        or "=" in value
+        or any(char.isspace() for char in value)
+    ):
+        raise ValueError(f"{field} must be a valid absolute ROS topic name")
     return value
 
 
@@ -96,13 +124,62 @@ def validate_config(config: McapRecorderConfig) -> None:
         raise ValueError("At least one raw ROS topic must be configured")
     for index, topic in enumerate(config.topics):
         _require_topic_name(topic, field=f"topics[{index}]")
+    if len(set(config.topics)) != len(config.topics):
+        raise ValueError("mcap.topics must be unique")
     _require_topic_name(config.event_topic, field="event_topic")
+    if config.event_topic in config.topics:
+        raise ValueError("event_topic must not overlap mcap.topics")
     if config.max_episodes <= 0:
         raise ValueError("max_episodes must be positive")
     for name in ("startup_timeout_s", "metadata_publish_timeout_s", "shutdown_timeout_s"):
         value = float(getattr(config, name))
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
+
+    sampling = config.arm_sampling
+    if sampling is None:
+        return
+    try:
+        rate_hz = float(sampling.rate_hz)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("arm_sampling.rate_hz must be finite and positive") from exc
+    if isinstance(sampling.rate_hz, bool) or not math.isfinite(rate_hz) or rate_hz <= 0:
+        raise ValueError("arm_sampling.rate_hz must be finite and positive")
+    if len(sampling.routes) != 8:
+        raise ValueError("arm_sampling.routes must contain exactly 8 source-to-recorded routes")
+    sources: list[str] = []
+    recorded: list[str] = []
+    for index, route in enumerate(sampling.routes):
+        source = _require_topic_name(
+            route.source_topic,
+            field=f"arm_sampling.routes[{index}].source_topic",
+        )
+        destination = _require_topic_name(
+            route.recorded_topic,
+            field=f"arm_sampling.routes[{index}].recorded_topic",
+        )
+        if source == destination:
+            raise ValueError(f"arm_sampling route {index} source_topic must differ from recorded_topic")
+        sources.append(source)
+        recorded.append(destination)
+    if len(set(sources)) != len(sources):
+        raise ValueError("arm_sampling source_topic values must be unique")
+    if len(set(recorded)) != len(recorded):
+        raise ValueError("arm_sampling recorded_topic values must be unique")
+    missing_outputs = sorted(set(recorded).difference(config.topics))
+    if missing_outputs:
+        raise ValueError(
+            "Every arm_sampling recorded_topic must occur in mcap.topics; missing: "
+            + ", ".join(missing_outputs)
+        )
+    directly_recorded_sources = sorted(set(sources).intersection(config.topics))
+    if directly_recorded_sources:
+        raise ValueError(
+            "arm_sampling source topics must not occur directly in mcap.topics: "
+            + ", ".join(directly_recorded_sources)
+        )
+    if config.event_topic in sources:
+        raise ValueError("event_topic must not overlap an arm_sampling source_topic")
 
 
 def _topic_strings(value: Any, *, field: str) -> list[str]:
@@ -156,6 +233,44 @@ def configured_raw_topics(data: Mapping[str, Any]) -> tuple[str, ...]:
     return _deduplicate(topics)
 
 
+def _arm_sampling_from_mapping(data: Mapping[str, Any]) -> ArmSamplingConfig | None:
+    raw = data.get("arm_sampling")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("arm_sampling must be a mapping")
+    if isinstance(raw.get("rate_hz"), bool):
+        raise ValueError("arm_sampling.rate_hz must be a number")
+    try:
+        rate_hz = float(raw["rate_hz"])
+    except KeyError as exc:
+        raise ValueError("arm_sampling.rate_hz is required") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError("arm_sampling.rate_hz must be a number") from exc
+    raw_routes = raw.get("routes")
+    if not isinstance(raw_routes, list | tuple):
+        raise ValueError("arm_sampling.routes must be a list")
+    routes: list[ArmSamplingRoute] = []
+    for index, raw_route in enumerate(raw_routes):
+        if not isinstance(raw_route, Mapping):
+            raise ValueError(f"arm_sampling.routes[{index}] must be a mapping")
+        if "source_topic" not in raw_route or "recorded_topic" not in raw_route:
+            raise ValueError(f"arm_sampling.routes[{index}] requires source_topic and recorded_topic")
+        routes.append(
+            ArmSamplingRoute(
+                source_topic=_require_topic_name(
+                    raw_route["source_topic"],
+                    field=f"arm_sampling.routes[{index}].source_topic",
+                ),
+                recorded_topic=_require_topic_name(
+                    raw_route["recorded_topic"],
+                    field=f"arm_sampling.routes[{index}].recorded_topic",
+                ),
+            )
+        )
+    return ArmSamplingConfig(rate_hz=rate_hz, routes=tuple(routes))
+
+
 def load_config(path: Path) -> McapRecorderConfig:
     with path.open(encoding="utf-8") as stream:
         data = yaml.safe_load(stream)
@@ -175,6 +290,7 @@ def load_config(path: Path) -> McapRecorderConfig:
         startup_timeout_s=float(mcap.get("startup_timeout_s", 15.0)),
         metadata_publish_timeout_s=float(mcap.get("metadata_publish_timeout_s", 15.0)),
         shutdown_timeout_s=float(mcap.get("shutdown_timeout_s", 30.0)),
+        arm_sampling=_arm_sampling_from_mapping(data),
     )
     validate_config(config)
     return config
@@ -372,8 +488,13 @@ def _write_json_atomic(path: Path, data: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
-def stop_process_gracefully(process: Any, *, timeout_s: float) -> int:
-    """Stop rosbag2 with SIGINT, escalating only if it does not exit."""
+def stop_process_gracefully(
+    process: Any,
+    *,
+    timeout_s: float,
+    process_name: str = "ros2 bag record",
+) -> int:
+    """Stop a managed process with SIGINT, escalating only if needed."""
 
     returncode = process.poll()
     if returncode is not None:
@@ -382,14 +503,211 @@ def stop_process_gracefully(process: Any, *, timeout_s: float) -> int:
     try:
         return int(process.wait(timeout=timeout_s))
     except subprocess.TimeoutExpired:
-        LOGGER.warning("ros2 bag record ignored SIGINT; sending SIGTERM")
+        LOGGER.warning("%s ignored SIGINT; sending SIGTERM", process_name)
         process.terminate()
     try:
         return int(process.wait(timeout=min(5.0, timeout_s)))
     except subprocess.TimeoutExpired:
-        LOGGER.error("ros2 bag record ignored SIGTERM; sending SIGKILL")
+        LOGGER.error("%s ignored SIGTERM; sending SIGKILL", process_name)
         process.kill()
         return int(process.wait(timeout=5.0))
+
+
+def build_arm_relay_command(
+    python_executable: str,
+    sampling: ArmSamplingConfig,
+    *,
+    ready_file: Path,
+    startup_timeout_s: float,
+) -> list[str]:
+    """Build the exact relay subprocess argv shared by manual and eval."""
+
+    try:
+        rate_hz = float(sampling.rate_hz)
+        startup_timeout = float(startup_timeout_s)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Relay rate and startup timeout must be numbers") from exc
+    if not math.isfinite(rate_hz) or rate_hz <= 0:
+        raise ValueError("arm_sampling.rate_hz must be finite and positive")
+    if not math.isfinite(startup_timeout) or startup_timeout <= 0:
+        raise ValueError("startup_timeout_s must be finite and positive")
+    command = [
+        python_executable,
+        "-m",
+        ARM_RELAY_MODULE,
+        "--rate-hz",
+        str(rate_hz),
+        "--startup-timeout",
+        str(startup_timeout),
+        "--ready-file",
+        str(ready_file),
+    ]
+    for route in sampling.routes:
+        command.extend(["--topic", f"{route.source_topic}={route.recorded_topic}"])
+    return command
+
+
+def _validate_relay_ready_payload(
+    value: Any,
+    sampling: ArmSamplingConfig,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise McapRecorderError("Arm relay ready file must contain a JSON object")
+    if value.get("schema_version") != 1:
+        raise McapRecorderError("Arm relay ready file has an unsupported schema_version")
+    if value.get("status") != "ready":
+        raise McapRecorderError("Arm relay ready file does not declare status=ready")
+    ready_unix_ns = value.get("ready_unix_ns")
+    if isinstance(ready_unix_ns, bool) or not isinstance(ready_unix_ns, int) or ready_unix_ns <= 0:
+        raise McapRecorderError("Arm relay ready file has no valid ready_unix_ns")
+    if isinstance(value.get("rate_hz"), bool):
+        raise McapRecorderError("Arm relay ready file has no valid rate_hz")
+    try:
+        ready_rate_hz = float(value["rate_hz"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise McapRecorderError("Arm relay ready file has no valid rate_hz") from exc
+    if not math.isclose(ready_rate_hz, float(sampling.rate_hz), rel_tol=1e-9, abs_tol=0.0):
+        raise McapRecorderError(
+            f"Arm relay ready rate {ready_rate_hz} does not match configured {sampling.rate_hz}"
+        )
+    ready_routes = value.get("routes")
+    if not isinstance(ready_routes, list) or len(ready_routes) != len(sampling.routes):
+        raise McapRecorderError("Arm relay ready file does not contain all configured routes")
+
+    expected = {route.source_topic: route.recorded_topic for route in sampling.routes}
+    resolved: dict[str, tuple[str, str]] = {}
+    for index, route in enumerate(ready_routes):
+        if not isinstance(route, Mapping):
+            raise McapRecorderError(f"Arm relay ready route {index} must be a JSON object")
+        source = route.get("source_topic")
+        destination = route.get("destination_topic")
+        message_type = route.get("message_type")
+        if not isinstance(source, str) or not isinstance(destination, str):
+            raise McapRecorderError(f"Arm relay ready route {index} has invalid topic names")
+        if not isinstance(message_type, str) or not message_type.strip():
+            raise McapRecorderError(f"Arm relay ready route {index} has no resolved message type")
+        if source in resolved:
+            raise McapRecorderError(f"Arm relay ready file repeats source topic {source}")
+        resolved[source] = (destination, message_type)
+    if set(resolved) != set(expected):
+        raise McapRecorderError("Arm relay ready sources do not match the configured routes")
+    mismatched = [source for source, destination in expected.items() if resolved[source][0] != destination]
+    if mismatched:
+        raise McapRecorderError(
+            "Arm relay ready destinations do not match configuration: " + ", ".join(mismatched)
+        )
+    return dict(value)
+
+
+class ArmRateRelayProcess:
+    """Supervise one arm relay across any number of MCAP episodes."""
+
+    def __init__(
+        self,
+        sampling: ArmSamplingConfig,
+        *,
+        ready_file: Path,
+        startup_timeout_s: float,
+        shutdown_timeout_s: float,
+        python_executable: str = sys.executable,
+        popen_factory: Callable[..., Any] = subprocess.Popen,
+        monotonic_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.sampling = sampling
+        self.ready_file = ready_file
+        self.startup_timeout_s = float(startup_timeout_s)
+        self.shutdown_timeout_s = float(shutdown_timeout_s)
+        self.python_executable = python_executable
+        self._popen_factory = popen_factory
+        self._monotonic = monotonic_fn
+        self._sleep = sleep_fn
+        self.process: Any | None = None
+        self.ready_payload: dict[str, Any] | None = None
+        self.command = tuple(
+            build_arm_relay_command(
+                python_executable,
+                sampling,
+                ready_file=ready_file,
+                startup_timeout_s=self.startup_timeout_s,
+            )
+        )
+
+    def health_error(self) -> str | None:
+        if self.process is None:
+            return "arm relay has not been started"
+        returncode = self.process.poll()
+        if returncode is not None:
+            return f"arm relay exited with code {returncode}"
+        if self.ready_payload is None:
+            return "arm relay has not completed its ready handshake"
+        return None
+
+    def start(self) -> dict[str, Any]:
+        if self.process is not None:
+            error = self.health_error()
+            if error is not None:
+                raise McapRecorderError(error)
+            assert self.ready_payload is not None
+            return self.ready_payload
+
+        self.ready_file.parent.mkdir(parents=True, exist_ok=True)
+        self.ready_file.unlink(missing_ok=True)
+        process = self._popen_factory(
+            list(self.command),
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.process = process
+        # Give the relay its full discovery timeout plus a small supervisor
+        # margin in which to atomically publish the ready marker.
+        deadline = self._monotonic() + self.startup_timeout_s + 1.0
+        try:
+            while not self.ready_file.is_file():
+                returncode = process.poll()
+                if returncode is not None:
+                    raise McapRecorderError(f"Arm relay exited before becoming ready (code {returncode})")
+                if self._monotonic() >= deadline:
+                    raise McapRecorderError(f"Timed out waiting for arm relay ready file {self.ready_file}")
+                self._sleep(0.02)
+            try:
+                value = json.loads(self.ready_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise McapRecorderError(f"Cannot read arm relay ready file: {exc}") from exc
+            payload = _validate_relay_ready_payload(value, self.sampling)
+            returncode = process.poll()
+            if returncode is not None:
+                raise McapRecorderError(
+                    f"Arm relay exited immediately after becoming ready (code {returncode})"
+                )
+            self.ready_payload = payload
+            return payload
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.stop()
+            raise
+
+    def stop(self) -> int | None:
+        process = self.process
+        self.process = None
+        self.ready_payload = None
+        try:
+            if process is None:
+                return None
+            return stop_process_gracefully(
+                process,
+                timeout_s=self.shutdown_timeout_s,
+                process_name="arm rate relay",
+            )
+        finally:
+            self.ready_file.unlink(missing_ok=True)
+
+    def __enter__(self) -> ArmRateRelayProcess:
+        self.start()
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.stop()
 
 
 class RawMcapRecorder:
@@ -405,6 +723,7 @@ class RawMcapRecorder:
         time_ns_fn: Callable[[], int] = time.time_ns,
         monotonic_fn: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
+        relay_manager: ArmRateRelayProcess | None = None,
     ) -> None:
         validate_config(config)
         self.config = config
@@ -420,6 +739,44 @@ class RawMcapRecorder:
         self.active: ActiveEpisode | None = None
         self.saved_episodes = 0
         self._next_episode_index = 0
+        if relay_manager is not None and config.arm_sampling is None:
+            raise ValueError("relay_manager requires config.arm_sampling")
+        if relay_manager is not None and relay_manager.sampling != config.arm_sampling:
+            raise ValueError("relay_manager sampling contract does not match config.arm_sampling")
+        self.arm_relay = relay_manager
+        if self.arm_relay is None and config.arm_sampling is not None:
+            self.arm_relay = ArmRateRelayProcess(
+                config.arm_sampling,
+                ready_file=self.dataset_path / ARM_RELAY_READY_NAME,
+                startup_timeout_s=config.startup_timeout_s,
+                shutdown_timeout_s=config.shutdown_timeout_s,
+                popen_factory=popen_factory,
+                monotonic_fn=monotonic_fn,
+                sleep_fn=sleep_fn,
+            )
+        arm_sampling_manifest: dict[str, Any] | None = None
+        if config.arm_sampling is not None:
+            arm_sampling_manifest = {
+                "rate_hz": float(config.arm_sampling.rate_hz),
+                "selection_policy": "latest_unseen",
+                "stale_message_republication": False,
+                "lossy": True,
+                "source_subscription_qos": "best_effort_keep_last_depth_1",
+                "recorded_output_qos": "reliable_keep_last_depth_10",
+                "source_payload": "logical_fields_preserved_after_typed_reserialization",
+                "serialized_byte_identity": "not_guaranteed",
+                "source_header_stamp": "preserved_when_present",
+                "bag_receipt_timestamp": "relay_publish_time",
+                "source_receipt_timestamp": "not_preserved",
+                "routes": [
+                    {
+                        "source_topic": route.source_topic,
+                        "recorded_topic": route.recorded_topic,
+                    }
+                    for route in config.arm_sampling.routes
+                ],
+                "runtime": None,
+            }
         self._manifest: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "format": "ros2_mcap",
@@ -431,11 +788,15 @@ class RawMcapRecorder:
             "topics": list(config.topics),
             "metadata_event_topic": config.event_topic,
             "rewarded": config.rewarded,
+            "arm_sampling": arm_sampling_manifest,
             "message_handling": {
-                "subscription_and_serialization": "rosbag2",
+                "subscription_and_serialization": (
+                    "typed_rclpy_arm_relay_then_rosbag2" if config.arm_sampling is not None else "rosbag2"
+                ),
                 "online_decoding": False,
+                "online_typed_deserialization": config.arm_sampling is not None,
                 "online_synchronization": False,
-                "online_resampling": False,
+                "online_resampling": config.arm_sampling is not None,
                 "online_aggregation": False,
                 "recording_stop_before_reward": True,
                 "reward_storage": "sidecar_manifest_only",
@@ -447,6 +808,48 @@ class RawMcapRecorder:
 
     def _write_dataset_manifest(self) -> None:
         _write_json_atomic(self.dataset_path / DATASET_MANIFEST_NAME, self._manifest)
+
+    def start_arm_relay(self) -> dict[str, Any] | None:
+        """Start once and keep the relay alive across episode boundaries."""
+
+        if self.arm_relay is None:
+            return None
+        payload = self.arm_relay.start()
+        try:
+            sampling_manifest = self._manifest["arm_sampling"]
+            assert isinstance(sampling_manifest, dict)
+            if sampling_manifest["runtime"] is None:
+                process = self.arm_relay.process
+                sampling_manifest["runtime"] = {
+                    "ready": payload,
+                    "command": list(self.arm_relay.command),
+                    "process_pid": getattr(process, "pid", None),
+                    "shutdown_exit_code": None,
+                    "stopped_unix_ns": None,
+                }
+                self._write_dataset_manifest()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.close()
+            raise
+        return payload
+
+    def arm_relay_health_error(self) -> str | None:
+        if self.arm_relay is None:
+            return None
+        return self.arm_relay.health_error()
+
+    def close(self) -> None:
+        """Stop the session-wide arm relay; safe to call repeatedly."""
+
+        if self.arm_relay is None or self.arm_relay.process is None:
+            return
+        returncode = self.arm_relay.stop()
+        sampling_manifest = self._manifest["arm_sampling"]
+        if isinstance(sampling_manifest, dict) and isinstance(sampling_manifest.get("runtime"), dict):
+            sampling_manifest["runtime"]["shutdown_exit_code"] = returncode
+            sampling_manifest["runtime"]["stopped_unix_ns"] = self._time_ns()
+            self._write_dataset_manifest()
 
     def _wait_until_started(self, process: Any, episode_path: Path) -> None:
         deadline = self._monotonic() + self.config.startup_timeout_s
@@ -476,18 +879,20 @@ class RawMcapRecorder:
         episode_path = self.dataset_path / f"episode_{index:06d}"
         if episode_path.exists():
             raise McapRecorderError(f"Episode path already exists: {episode_path}")
+        self.start_arm_relay()
         command = build_record_command(
             self.ros2_executable,
             episode_path,
             self.config.recorded_topics,
         )
         start_requested = requested_unix_ns if requested_unix_ns is not None else self._time_ns()
-        process = self._popen_factory(
-            command,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        process = None
         try:
+            process = self._popen_factory(
+                command,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             self._wait_until_started(process, episode_path)
             event_time = self._time_ns()
             active = ActiveEpisode(
@@ -510,10 +915,13 @@ class RawMcapRecorder:
                 )
             )
         except BaseException:
-            with contextlib.suppress(Exception):
-                stop_process_gracefully(process, timeout_s=self.config.shutdown_timeout_s)
+            if process is not None:
+                with contextlib.suppress(Exception):
+                    stop_process_gracefully(process, timeout_s=self.config.shutdown_timeout_s)
             shutil.rmtree(episode_path, ignore_errors=True)
             self.active = None
+            with contextlib.suppress(Exception):
+                self.close()
             raise
         LOGGER.info("Recording episode %d to %s", index, episode_path)
         return active
@@ -546,9 +954,11 @@ class RawMcapRecorder:
         self.active = None
         LOGGER.info("Stopped raw capture for episode %d before reward handling", active.index)
         process_ok = returncode in (0, -signal.SIGINT)
+        relay_error = self.arm_relay_health_error()
+        capture_ok = process_ok and relay_error is None
         reward_error: BaseException | None = None
         reward_recorded_unix_ns: int | None = None
-        if intended_complete and process_ok and active.path.is_dir() and reward_provider is not None:
+        if intended_complete and capture_ok and active.path.is_dir() and reward_provider is not None:
             try:
                 reward = float(reward_provider())
                 if not math.isfinite(reward):
@@ -562,7 +972,7 @@ class RawMcapRecorder:
         elif reward is not None:
             reward_recorded_unix_ns = self._time_ns()
 
-        complete = intended_complete and reward_error is None and process_ok and active.path.is_dir()
+        complete = intended_complete and reward_error is None and capture_ok and active.path.is_dir()
         status = "complete" if complete else "incomplete"
         episode_manifest = {
             "schema_version": SCHEMA_VERSION,
@@ -579,6 +989,8 @@ class RawMcapRecorder:
             "recording_stopped_unix_ns": recording_stopped_unix_ns,
             "reward_recorded_unix_ns": reward_recorded_unix_ns,
             "rosbag_exit_code": returncode,
+            "arm_relay_error": relay_error,
+            "arm_sampling": self._manifest["arm_sampling"],
             "reward_error": str(reward_error) if reward_error is not None else None,
             "topics": list(self.config.topics),
             "metadata_event_topic": self.config.event_topic,
@@ -590,8 +1002,9 @@ class RawMcapRecorder:
         if not retain:
             shutil.rmtree(active.path, ignore_errors=True)
             self._next_episode_index += 1
-            if not process_ok:
-                raise McapRecorderError(f"ros2 bag record exited with code {returncode}")
+            if not capture_ok:
+                detail = relay_error or f"ros2 bag record exited with code {returncode}"
+                raise McapRecorderError(detail)
             return None
 
         if active.path.is_dir():
@@ -611,6 +1024,8 @@ class RawMcapRecorder:
             self.saved_episodes += 1
         if reward_error is not None:
             raise reward_error
+        if relay_error is not None:
+            raise McapRecorderError(f"Episode retained as incomplete because {relay_error}")
         if not process_ok:
             raise McapRecorderError(
                 f"Episode retained as incomplete because ros2 bag record exited with code {returncode}"
@@ -626,15 +1041,23 @@ class RawMcapRecorder:
         requested_unix_ns: int | None = None,
         reward_provider: Callable[[], float] | None = None,
     ) -> Path:
-        path = self._finish_active(
-            outcome="saved",
-            requested_unix_ns=requested_unix_ns,
-            reward=reward,
-            reward_provider=reward_provider,
-            retain=True,
-            intended_complete=True,
-        )
+        try:
+            path = self._finish_active(
+                outcome="saved",
+                requested_unix_ns=requested_unix_ns,
+                reward=reward,
+                reward_provider=reward_provider,
+                retain=True,
+                intended_complete=True,
+            )
+        except BaseException:
+            if self.active is None:
+                with contextlib.suppress(Exception):
+                    self.close()
+            raise
         assert path is not None
+        if self.saved_episodes >= self.config.max_episodes:
+            self.close()
         return path
 
     def discard_episode(self, *, requested_unix_ns: int | None = None, reason: str = "discarded") -> None:
@@ -648,14 +1071,18 @@ class RawMcapRecorder:
         )
 
     def preserve_interrupted_episode(self, *, reason: str = "interrupted") -> Path:
-        path = self._finish_active(
-            outcome=reason,
-            requested_unix_ns=self._time_ns(),
-            reward=None,
-            reward_provider=None,
-            retain=True,
-            intended_complete=False,
-        )
+        try:
+            path = self._finish_active(
+                outcome=reason,
+                requested_unix_ns=self._time_ns(),
+                reward=None,
+                reward_provider=None,
+                retain=True,
+                intended_complete=False,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                self.close()
         assert path is not None
         return path
 
@@ -738,6 +1165,7 @@ def _apply_cli_overrides(config: McapRecorderConfig, args: argparse.Namespace) -
         startup_timeout_s=config.startup_timeout_s,
         metadata_publish_timeout_s=config.metadata_publish_timeout_s,
         shutdown_timeout_s=config.shutdown_timeout_s,
+        arm_sampling=config.arm_sampling,
     )
     validate_config(overridden)
     return overridden
@@ -751,10 +1179,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = _apply_cli_overrides(load_config(args.config), args)
     ros2_executable = preflight_ros2()
     recorder = RawMcapRecorder(config, ros2_executable)
-    LOGGER.info("Dataset: %s", recorder.dataset_path)
-    LOGGER.info("Idle: r=start, q=quit. Recording: e/s=end+save, d=discard, q=discard+quit.")
 
     try:
+        recorder.start_arm_relay()
+        LOGGER.info("Dataset: %s", recorder.dataset_path)
+        LOGGER.info("Idle: r=start, q=quit. Recording: e/s=end+save, d=discard, q=discard+quit.")
         with TerminalKeys() as keyboard:
 
             def prompt_in_cooked_mode() -> float:
@@ -798,6 +1227,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if recorder.active is not None:
             with contextlib.suppress(Exception):
                 recorder.preserve_interrupted_episode(reason="unexpected_shutdown")
+        with contextlib.suppress(Exception):
+            recorder.close()
     return 0
 
 

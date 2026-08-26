@@ -228,6 +228,7 @@ def test_episode_stops_before_reward_and_saves_sidecar_manifest(tmp_path: Path) 
     assert dataset_manifest["message_handling"] == {
         "subscription_and_serialization": "rosbag2",
         "online_decoding": False,
+        "online_typed_deserialization": False,
         "online_synchronization": False,
         "online_resampling": False,
         "online_aggregation": False,

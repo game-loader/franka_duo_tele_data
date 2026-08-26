@@ -372,6 +372,58 @@ def test_eval_mcap_config_records_all_raw_topics_and_action_trace(tmp_path):
     )
 
 
+def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
+    routes = [
+        {
+            "source_topic": f"/{side}/franka_robot_state_broadcaster/{stream}",
+            "recorded_topic": (
+                f"/franka_duo_tele_data/rate100/{side}/franka_robot_state_broadcaster/{stream}"
+            ),
+        }
+        for side in ("left", "right")
+        for stream in (
+            "current_pose",
+            "desired_joint_states",
+            "measured_joint_states",
+            "desired_end_effector_twist",
+        )
+    ]
+    raw_config = tmp_path / "raw_mcap.yaml"
+    raw_config.write_text(
+        yaml.safe_dump(
+            {
+                "output_root": str(tmp_path / "bags"),
+                "dataset_name": "raw_inputs",
+                "arm_sampling": {"rate_hz": 100, "routes": routes},
+                "mcap": {
+                    "rewarded": False,
+                    "topics": [
+                        *_default_eval_input_topics(),
+                        *(route["recorded_topic"] for route in routes),
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_eval_config(None)
+    config.mcap_config = raw_config
+    args = SimpleNamespace(
+        mcap_config=None,
+        mcap_output_root=None,
+        mcap_dataset_name=None,
+        reward=None,
+        prompt_reward=False,
+    )
+
+    capture = build_eval_mcap_config(config, args, require_state=False)
+
+    assert capture.arm_sampling is not None
+    assert capture.arm_sampling.rate_hz == 100.0
+    assert len(capture.arm_sampling.routes) == 8
+    assert capture.topics[-1] == "/franka_duo/eval/action_trace"
+
+
 def test_eval_mcap_config_rejects_an_unrecorded_input_topic(tmp_path):
     topics = _default_eval_input_topics()
     topics.remove("/isaac/head_camera/depth")

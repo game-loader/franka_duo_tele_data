@@ -8,8 +8,13 @@ recording their raw eval provenance.
   paper tooling, or ARA artifacts.
 - Keep ROS 2 and camera drivers host-managed; do not vendor them as Python
   dependencies.
-- Keep live capture on rosbag2 MCAP with the `zstd_fast` storage preset. Do not
-  decode, synchronize, resample, aggregate, normalize, or run FK online.
+- Keep live capture on rosbag2 MCAP with the `zstd_fast` storage preset. Camera,
+  gripper, and TF topics stay direct and are never decoded, synchronized,
+  resampled, aggregated, normalized, or passed through FK online. The sole
+  exception is the configured eight Franka arm streams: a supervised typed
+  relay must cap them at 100 Hz, preserve all message fields/header stamps, and
+  rosbag2 must record only the relay destinations rather than the ~1000 Hz
+  sources.
 - Preserve the raw TMR topic contract, the offline-derived 16D joint-space
   contract, and the 20D Cartesian evaluation contract unless the user
   explicitly approves a versioned change.
