@@ -11,13 +11,14 @@ recording their raw eval provenance.
 - Keep live capture on rosbag2 MCAP with the `zstd_fast` storage preset. Camera,
   gripper, and TF topics stay direct and are never decoded, synchronized,
   resampled, aggregated, normalized, or passed through FK online. The sole
-  exception is the configured eight Franka arm streams: a supervised typed
+  exception is the configured six Franka arm streams: a supervised typed
   relay must cap them at 100 Hz, preserve all message fields/header stamps, and
   rosbag2 must record only the relay destinations rather than the ~1000 Hz
   sources.
-- Preserve the raw TMR topic contract, the offline-derived 16D joint-space
-  contract, and the 20D Cartesian evaluation contract unless the user
-  explicitly approves a versioned change.
+- Preserve the raw TMR topic contract and the 20D Cartesian evaluation
+  contract unless the user explicitly approves a versioned change. The raw
+  contract intentionally excludes non-changing desired joint states; do not
+  claim that the old 16D desired-joint action can be derived from these bags.
 - Never substitute measured joints for applied/desired action targets.
 - Evaluation must remain dry-run by default. Robot publication requires both
   explicit safety gates and must target a site-owned relay, not a controller

@@ -383,7 +383,6 @@ def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
         for side in ("left", "right")
         for stream in (
             "current_pose",
-            "desired_joint_states",
             "measured_joint_states",
             "desired_end_effector_twist",
         )
@@ -420,7 +419,7 @@ def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
 
     assert capture.arm_sampling is not None
     assert capture.arm_sampling.rate_hz == 100.0
-    assert len(capture.arm_sampling.routes) == 8
+    assert len(capture.arm_sampling.routes) == 6
     assert capture.topics[-1] == "/franka_duo/eval/action_trace"
 
 

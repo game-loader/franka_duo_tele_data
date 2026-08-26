@@ -72,7 +72,7 @@ def test_existing_tmr_mapping_extracts_raw_robot_camera_and_depth_topics() -> No
     data = {
         "topics": {
             "left_measured_joint_states": "/left/measured",
-            "right_desired_joint_states": "/right/desired",
+            "right_controller_state": "/right/control",
         },
         "cameras": {
             "head": {
@@ -87,7 +87,7 @@ def test_existing_tmr_mapping_extracts_raw_robot_camera_and_depth_topics() -> No
 
     assert configured_raw_topics(data) == (
         "/left/measured",
-        "/right/desired",
+        "/right/control",
         "/head/rgb",
         "/head/depth",
         "/head/info",

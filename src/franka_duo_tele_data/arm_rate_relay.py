@@ -37,7 +37,6 @@ DEFAULT_NODE_NAME = "franka_duo_arm_rate_relay"
 _BROADCASTER = "franka_robot_state_broadcaster"
 _ARM_STREAMS = (
     "current_pose",
-    "desired_joint_states",
     "measured_joint_states",
     "desired_end_effector_twist",
 )
