@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "franka-duo-tele-data"
+version = "0.1.0"
+description = "Lean ROS 2 recording and policy-evaluation tools for a real Franka Duo"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.23.5,<2.3.0",
+    "PyYAML>=6.0.2,<7.0.0",
+]
+
+[project.urls]
+source = "https://github.com/game-loader/franka_duo_tele_data"
+issues = "https://github.com/game-loader/franka_duo_tele_data/issues"
+
+[project.scripts]
+franka-duo-mcap-record = "franka_duo_tele_data.mcap_recorder:main"
+franka-duo-eval = "franka_duo_tele_data.eval_franka_duo:main"
+franka-duo-export-bundle = "franka_duo_tele_data.export_rl100_eval_bundle:main"
+
+[project.optional-dependencies]
+# ROS 2 Python messages come from the sourced robot-host installation, not PyPI.
+record = []
+eval = [
+    "torch>=2.7.0,<2.12.0",
+]
+# Add this only for exported LeRobot policies. Native RL-100 bundles need eval only.
+lerobot-policy = [
+    "lerobot[dp3] @ https://github.com/game-loader/lerobot_droid/archive/0bab8685280cf53f40f1a4a03b6ff213d7ab8b94.tar.gz ; python_version >= '3.12'",
+]
+dev = [
+    "pytest>=8.1.0,<9.0.0",
+    "pytest-timeout>=2.4.0,<3.0.0",
+    "ruff>=0.14.1,<0.15.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "T20", "N", "UP", "SIM"]
+ignore = ["E501", "T201", "T203", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403", "E402"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["franka_duo_tele_data"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true

@@ -1,0 +1,33 @@
+# Python and tooling
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Local configuration and editors
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Runtime output. Never commit robot data or model weights.
+datasets/
+outputs/
+bundles/
+checkpoints/
+*.log
+*.jsonl
+.hf-datasets-cache/
+
+# Local repository memory is outside this project's scope.
+.repo_memory/

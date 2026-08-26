@@ -1,0 +1,48 @@
+# Default competition-site capture contract.
+#
+# The recorder hard-fixes rosbag2 storage to MCAP and the storage preset to
+# zstd_fast. Neither setting is configurable from this file. Every listed ROS
+# message is serialized by rosbag2 as received: there is no Python decoding,
+# synchronization, resampling, action/state aggregation, or image conversion.
+dataset_name: franka_duo_tmr_raw
+output_root: datasets/franka_duo_mcap
+max_episodes: 100
+
+mcap:
+  # Normal recording is reward-free; run_manual_recorder.sh overrides this to
+  # true and stores the operator reward in the end metadata event/manifest.
+  rewarded: false
+  event_topic: /franka_duo_tele_data/episode_event
+  startup_timeout_s: 15.0
+  metadata_publish_timeout_s: 15.0
+  shutdown_timeout_s: 30.0
+
+  topics:
+    # Dual FR3 measured state and controller-desired targets.
+    - /left/franka_robot_state_broadcaster/measured_joint_states
+    - /right/franka_robot_state_broadcaster/measured_joint_states
+    - /left/franka_robot_state_broadcaster/desired_joint_states
+    - /right/franka_robot_state_broadcaster/desired_joint_states
+
+    # Headerless target fractions and measured Robotiq JointState streams.
+    - /left/gripper/gripper_client/target_gripper_width_percent
+    - /right/gripper/gripper_client/target_gripper_width_percent
+    - /left/gripper/joint_states
+    - /right/gripper/joint_states
+
+    # ZED-M rectified RGB, registered depth, and matching RGB intrinsics.
+    - /head_camera/zed/rgb/color/rect/image
+    - /head_camera/zed/depth/depth_registered
+    - /head_camera/zed/rgb/color/rect/camera_info
+
+    # Dual D405 color only. D405 depth topics are intentionally excluded.
+    - /wrist_camera_left/color/image_raw
+    - /wrist_camera_left/color/camera_info
+    - /wrist_camera_right/color/image_raw
+    - /wrist_camera_right/color/camera_info
+
+    # Retain available transforms for offline frame reconstruction. Their
+    # presence does not guarantee a complete/calibrated head-to-base TF tree;
+    # inspect the bag and use calibrated static extrinsics when it is absent.
+    - /tf
+    - /tf_static
