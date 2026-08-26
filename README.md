@@ -2,7 +2,7 @@
 
 `franka-duo-tele-data` 是比赛现场专用工具，默认工作流是：
 
-1. 将 6 路高频双臂流限频到最高 100 Hz，其余相机/夹爪/TF topic 由 ROS 2 rosbag2
+1. 将 4 路高频双臂流限频到最高 100 Hz，其余相机/夹爪/TF topic 由 ROS 2 rosbag2
    逐 episode 直接写入 MCAP；
 2. 在离线机器上做时间同步、版本化 action/state 构造、LeRobot v3 转换和 FK；
 3. 在真机上加载已导出的 IL / offline RL bundle，推理 20D Cartesian action，同时保存
@@ -13,7 +13,7 @@ ZED、RealSense、Franka 和 Robotiq 驱动均由真机主机提供。
 
 ## 为什么默认录原始 MCAP
 
-除 6 路高频双臂 stream 的轻量 relay 外，现场采集进程不再自行订阅数据，也不解码、
+除 4 路高频双臂 stream 的轻量 relay 外，现场采集进程不再自行订阅数据，也不解码、
 同步或写 LeRobot。relay 输出与其余直录 topic 一起交给等价于下面的 rosbag2 命令：
 
 ```bash
@@ -28,14 +28,14 @@ ros2 bag record \
 
 - 不解码或重新编码 RGB/depth；
 - 不重采样 head 15 Hz、wrist 30 Hz、夹爪或 TF；
-- 仅对 6 路双臂 stream 做“最新未转发消息、每 10 ms 最多一次”的 100 Hz 上限采样；
+- 仅对 4 路双臂 stream 做“最新未转发消息、每 10 ms 最多一次”的 100 Hz 上限采样；
 - 不在线匹配 RGB/depth/control；
 - 不把左右臂/夹爪聚合成伪造的组合 `JointState`；
 - 不运行 FK，也不依赖 LeRobot、PyTorch、Pinocchio 或 FFmpeg。
 
 rosbag2 为每条已记录消息保存 bag receipt timestamp，消息 payload 内原有的
 `header.stamp` 也保留，两者不是同一个概念。相机、夹爪和 TF 是直录，receipt timestamp
-对应 rosbag2 收到原 publisher 消息的时间。6 路 arm 输出是 relay 的新 ROS publication：
+对应 rosbag2 收到原 publisher 消息的时间。4 路 arm 输出是 relay 的新 ROS publication：
 rclpy 会做 typed 反序列化和重新序列化，但不解释或修改任何 message field，原
 `header.stamp` 也保留；因此逻辑字段不变，但不承诺 CDR 序列化字节逐字相同。bag receipt
 timestamp 是 relay 发布时刻，不是 source 到达 relay 的时刻；被更晚消息覆盖的高频样本不会
@@ -55,7 +55,7 @@ rosbag2；end 边界、outcome 和可选 reward 随后写入 bag 外的 dataset/
 
 | 数据 | 录制方式 / Topic |
 |---|---|
-| 6 路双臂流 | 只录下节列出的 `/franka_duo_tele_data/rate100/...` relay 输出 |
+| 4 路双臂流 | 只录下节列出的 `/franka_duo_tele_data/rate100/...` relay 输出 |
 | 左右夹爪 target | `/left/gripper/gripper_client/target_gripper_width_percent`、右侧同名 topic |
 | 左右夹爪 actual | `/left/gripper/joint_states`、`/right/gripper/joint_states` |
 | ZED-M RGB | `/head_camera/zed/rgb/color/rect/image` |
@@ -65,22 +65,20 @@ rosbag2；end 边界、outcome 和可选 reward 随后写入 bag 外的 dataset/
 | 双 D405 CameraInfo | `/wrist_camera_left/color/camera_info`、右侧同名 topic |
 | 可用 TF | `/tf`、`/tf_static` |
 
-YAML 的 `mcap.topics` 恰好包含 19 条：6 条 arm relay 输出加 13 条相机、夹爪和 TF 直录
-topic，绝不包含 6 条 arm source。manual recorder 再加入 episode event，共 20 条；eval
-在相同 20 条基础上加入 `/franka_duo/eval/action_trace`，共 21 条。
+YAML 的 `mcap.topics` 恰好包含 17 条：4 条 arm relay 输出加 13 条相机、夹爪和 TF 直录
+topic，绝不包含 4 条 arm source。manual recorder 再加入 episode event，共 18 条；eval
+在相同 18 条基础上加入 `/franka_duo/eval/action_trace`，共 19 条。
 
 ### 双臂 100 Hz Relay 路由
 
-`arm_sampling.rate_hz: 100` 和以下 6 条 source -> recorded route 是显式录制契约：
+`arm_sampling.rate_hz: 100` 和以下 4 条 source -> recorded route 是显式录制契约：
 
 | Source topic | Recorded topic |
 |---|---|
 | `/left/franka_robot_state_broadcaster/current_pose` | `/franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/current_pose` |
 | `/left/franka_robot_state_broadcaster/measured_joint_states` | `/franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/measured_joint_states` |
-| `/left/franka_robot_state_broadcaster/desired_end_effector_twist` | `/franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/desired_end_effector_twist` |
 | `/right/franka_robot_state_broadcaster/current_pose` | `/franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose` |
 | `/right/franka_robot_state_broadcaster/measured_joint_states` | `/franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states` |
-| `/right/franka_robot_state_broadcaster/desired_end_effector_twist` | `/franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/desired_end_effector_twist` |
 
 relay 每 10 ms 对每条 route 检查一次单元素缓冲：期间收到多条时只发布最新一条；没有新
 消息时不发布，所以不会为了凑 100 Hz 重复 stale payload。它不插值、不修改 message field
@@ -163,7 +161,7 @@ echo "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 ## 现场 Preflight
 
 先启动双 FR3 controller、Robotiq manager、ZED 和双 D405，再检查完整 topic/type。以下
-数组明确覆盖所有 6 条 arm source；每条都必须有且仅有一个类型，并实际持续发布：
+数组明确覆盖所有 4 条 arm source；每条都必须有且仅有一个类型，并实际持续发布：
 
 ```bash
 ros2 topic list -t | grep -E \
@@ -172,10 +170,8 @@ ros2 topic list -t | grep -E \
 arm_sources=(
   /left/franka_robot_state_broadcaster/current_pose
   /left/franka_robot_state_broadcaster/measured_joint_states
-  /left/franka_robot_state_broadcaster/desired_end_effector_twist
   /right/franka_robot_state_broadcaster/current_pose
   /right/franka_robot_state_broadcaster/measured_joint_states
-  /right/franka_robot_state_broadcaster/desired_end_effector_twist
 )
 for topic in "${arm_sources[@]}"; do
   ros2 topic info -v "$topic"
@@ -189,8 +185,8 @@ ros2 topic echo /right/gripper/joint_states --once
 ```
 
 确认 measured joint stream 是 `sensor_msgs/msg/JointState`，每侧包含 7 个有限 position，
-且 header stamp 非零。`current_pose` 和 `desired_end_effector_twist` 的唯一实际类型以 graph
-discovery 为准，不能凭 topic 名猜测。确认 gripper target 是 `[0,1]` 的
+且 header stamp 非零。`current_pose` 的唯一实际类型以 graph discovery 为准，不能凭 topic
+名猜测。确认 gripper target 是 `[0,1]` 的
 `std_msgs/msg/Float32`。actual 夹爪多 joint 选择和闭合/打开端点不在原始录包阶段决定，
 但必须保存现场标定记录供离线状态构造使用。
 
@@ -212,17 +208,15 @@ df -h datasets/franka_duo_mcap
 ZED depth 必须是注册到 rectified RGB 像素坐标的 `depth_registered`。用现场画面核对 D405
 serial 的物理左右映射；旧指南曾出现相反的 serial 文字记录。
 
-启动 `run_manual_recorder.sh` 或 `run_eval.sh` 后，在另一终端核对 6 条 relay 输出。每条
+启动 `run_manual_recorder.sh` 或 `run_eval.sh` 后，在另一终端核对 4 条 relay 输出。每条
 输出应有与 source 相同的唯一 message type，活跃 source 的输出频率不得超过 100 Hz：
 
 ```bash
 arm_outputs=(
   /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/current_pose
   /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/measured_joint_states
-  /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/desired_end_effector_twist
   /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose
   /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states
-  /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/desired_end_effector_twist
 )
 for topic in "${arm_outputs[@]}"; do
   ros2 topic info -v "$topic"
@@ -244,8 +238,8 @@ done
 ./scripts/run_manual_recorder.sh --max-episodes 50
 ```
 
-manual 流程会自动启动并监督 6 路 arm relay，确认全部 route ready 后才允许 rosbag2 使用
-19 条 YAML topic 开录。两个脚本都调用同一个 `franka-duo-mcap-record`：空闲时 `r` 开始；
+manual 流程会自动启动并监督 4 路 arm relay，确认全部 route ready 后才允许 rosbag2 使用
+17 条 YAML topic 开录。两个脚本都调用同一个 `franka-duo-mcap-record`：空闲时 `r` 开始；
 录制中 `e` 或 `s`
 结束保存，`d` 丢弃，`q` 丢弃并退出。按 `e/s` 后会先发送 SIGINT，等待 rosbag2 完成 MCAP
 封包，再由 manual 脚本恢复终端行输入并要求有限标量 reward；relay 会保持就绪以便复用，
@@ -294,8 +288,8 @@ FRANKA_MCAP_CONFIG="$PWD/configs/my_site_mcap.yaml" ./scripts/run_recorder.sh
    时间单调性、消息类型、尺寸和 CameraInfo；
 2. 用 `episode_event` 验证 start，用 manifest 验证 end/outcome/reward，不把元数据时间当图像时间；
 3. 用新的 head RGB header stamp 作为目标帧，按明确阈值匹配 registered depth、左右 wrist、
-   rate100 relay 中的 current pose、measured joints 和 desired EE twist；arm 使用保留的 source
-   header stamp，headerless gripper target 使用直录 receipt timestamp；
+   rate100 relay 中的 current pose 和 measured joints；arm 使用保留的 source header stamp，
+   headerless gripper target 使用直录 receipt timestamp；
 4. 按训练任务明确选择并版本化 action/state 表示，记录每个派生帧对应的所有 source
    timestamp 和 skew；
 5. 编码三路 RGB，保存与 head RGB 一一对应的深度/标定 sidecar，写 LeRobot v3；
@@ -304,8 +298,8 @@ FRANKA_MCAP_CONFIG="$PWD/configs/my_site_mcap.yaml" ./scripts/run_recorder.sh
 `desired_joint_states` 因现场不变化而明确不录。因此这些 MCAP **不能**恢复旧的 16D
 desired-joint action，转换器也不得复制 measured joints、填零或前向填充来伪造它。当前每侧
 可用的机械臂原始量是 `current_pose`、`measured_joint_states` 和
-`desired_end_effector_twist`；夹爪仍同时保留 target 与 actual。后续 LeRobot action 可以选择
-EE twist、经验证的未来 EE target 或其他比赛控制表示，但必须先单独定义维度、坐标系、时间
+`current_pose` 和 `measured_joint_states`；夹爪仍同时保留 target 与 actual。后续 LeRobot
+action 可以选择经验证的 EE target 或其他比赛控制表示，但必须先单独定义维度、坐标系、时间
 horizon 和归一化，再写入派生数据 manifest。
 
 16D measured state 仍可在完成夹爪标定后离线构造：左右各 7 个 measured joint position，
@@ -345,7 +339,7 @@ uv run --extra eval franka-duo-export-bundle \
 
 ## Eval、自动 MCAP 与安全门
 
-`run_eval.sh` 默认在模型运行期间同时保存 6 路 rate100 arm 输出和其余直录 TMR topic，
+`run_eval.sh` 默认在模型运行期间同时保存 4 路 rate100 arm 输出和其余直录 TMR topic，
 并把每次推理的观测 source stamp、耗时和 20D action 作为
 `/franka_duo/eval/action_trace` 写入同一 MCAP。JSONL 只是可选副本；MCAP 是强制的现场
 provenance，不能关闭。
@@ -353,9 +347,9 @@ provenance，不能关闭。
 `configs/tmr_eval.yaml` 的 `mcap.config` 相对 eval YAML 解析，默认引用 `tmr_mcap.yaml`；
 `dataset_name` 为 `franka_duo_tmr_eval`，输出根目录继承 raw config 的
 `datasets/franka_duo_mcap`。每次 eval 创建一个新的 `_vN` 和一个自动 episode，MCAP 在
-eval ROS node 与推理循环之前启动。eval supervisor 也会自动启动同一 6 路 arm relay，只有
-全部 source/type 唯一并且输出 ready 后才启动 bag；19 条 YAML topic、episode event 和
-action trace 共 21 条进入同一个固定 `mcap/zstd_fast` bag。
+eval ROS node 与推理循环之前启动。eval supervisor 也会自动启动同一 4 路 arm relay，只有
+全部 source/type 唯一并且输出 ready 后才启动 bag；17 条 YAML topic、episode event 和
+action trace 共 19 条进入同一个固定 `mcap/zstd_fast` bag。
 
 第一步始终 dry-run 单帧；模型 action 会打印，但不会发到机器人 relay：
 

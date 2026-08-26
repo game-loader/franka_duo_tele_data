@@ -38,7 +38,6 @@ _BROADCASTER = "franka_robot_state_broadcaster"
 _ARM_STREAMS = (
     "current_pose",
     "measured_joint_states",
-    "desired_end_effector_twist",
 )
 DEFAULT_SOURCE_TOPICS = tuple(
     f"/{side}/{_BROADCASTER}/{stream}" for side in ("left", "right") for stream in _ARM_STREAMS

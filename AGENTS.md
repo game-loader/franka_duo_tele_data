@@ -11,7 +11,7 @@ recording their raw eval provenance.
 - Keep live capture on rosbag2 MCAP with the `zstd_fast` storage preset. Camera,
   gripper, and TF topics stay direct and are never decoded, synchronized,
   resampled, aggregated, normalized, or passed through FK online. The sole
-  exception is the configured six Franka arm streams: a supervised typed
+  exception is the configured four Franka arm streams: a supervised typed
   relay must cap them at 100 Hz, preserve all message fields/header stamps, and
   rosbag2 must record only the relay destinations rather than the ~1000 Hz
   sources.

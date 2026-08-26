@@ -384,7 +384,6 @@ def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
         for stream in (
             "current_pose",
             "measured_joint_states",
-            "desired_end_effector_twist",
         )
     ]
     raw_config = tmp_path / "raw_mcap.yaml"
@@ -419,7 +418,7 @@ def test_eval_mcap_config_preserves_arm_sampling_contract(tmp_path):
 
     assert capture.arm_sampling is not None
     assert capture.arm_sampling.rate_hz == 100.0
-    assert len(capture.arm_sampling.routes) == 6
+    assert len(capture.arm_sampling.routes) == 4
     assert capture.topics[-1] == "/franka_duo/eval/action_trace"
 
 
