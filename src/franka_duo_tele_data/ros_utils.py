@@ -189,8 +189,18 @@ def image_msg_to_rgb(message: Any, expected_shape: tuple[int, int, int] | None =
     return np.ascontiguousarray(result, dtype=np.uint8)
 
 
-def depth_msg_to_meters(message: Any, depth_scale: float = 0.001) -> np.ndarray:
-    """Decode registered ROS depth into a contiguous float16 meter image."""
+def depth_msg_to_meters(
+    message: Any,
+    depth_scale: float = 0.001,
+    *,
+    dtype: np.dtype | type = np.float16,
+) -> np.ndarray:
+    """Decode registered ROS depth into a contiguous meter image.
+
+    Live evaluation defaults to ``float16`` to keep the callback cache small.
+    Offline point-cloud conversion can request ``float32`` so a ``32FC1`` ZED
+    payload is not quantized before deprojection.
+    """
 
     encoding = str(getattr(message, "encoding", "")).lower()
     if encoding in {"32fc1", "32fc"}:
@@ -199,4 +209,7 @@ def depth_msg_to_meters(message: Any, depth_scale: float = 0.001) -> np.ndarray:
         values = _image_rows(message, np.uint16).astype(np.float32) * float(depth_scale)
     else:
         raise ValueError(f"Unsupported depth encoding {encoding!r}")
-    return np.ascontiguousarray(values.astype("<f2"))
+    output_dtype = np.dtype(dtype)
+    if output_dtype not in (np.dtype(np.float16), np.dtype(np.float32)):
+        raise ValueError("depth dtype must be float16 or float32")
+    return np.ascontiguousarray(values.astype(output_dtype.newbyteorder("<")))

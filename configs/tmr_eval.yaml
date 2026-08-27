@@ -1,6 +1,8 @@
 # Live TMR camera configuration for eval_franka_duo.py. The exported bundle
 # owns point-cloud channels, sampling and model image resize; this file owns
-# the ROS topics and source image dimensions.
+# the ROS topics and source image dimensions. The target host D405 profile is
+# 480x270x30; the raw recorder preserves that source rate while this file's
+# fps value remains the evaluator's matching contract.
 
 # Mandatory raw provenance capture. The referenced file owns the raw TMR topic
 # list, event topic, output-root default and rosbag2 timeouts. The evaluator
@@ -37,14 +39,14 @@ cameras:
   wrist_left:
     image: /wrist_camera_left/color/image_raw
     camera_info: /wrist_camera_left/color/camera_info
-    width: 640
-    height: 480
+    width: 480
+    height: 270
     fps: 15
   wrist_right:
     image: /wrist_camera_right/color/image_raw
     camera_info: /wrist_camera_right/color/camera_info
-    width: 640
-    height: 480
+    width: 480
+    height: 270
     fps: 15
 
 rgb_match_tolerance_ms: 45.0

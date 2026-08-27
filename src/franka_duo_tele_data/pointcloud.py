@@ -11,18 +11,184 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Depth-image deprojection adapted from LeRobot's DP3 point-cloud utilities.
+"""Depth-image deprojection and RL100-style point-cloud sampling.
 
-Source: ``src/lerobot/policies/dp3/pointcloud.py`` in
-https://github.com/huggingface/lerobot.
+The RGB-D -> camera XYZ -> rigid transform -> XYZ-only spatial sampling order
+follows RL100's ``gym_util/mjpc_wrapper.py`` and its
+``mujoco_point_cloud.py`` implementation.  The deprojection API is compatible
+with LeRobot's DP3 point-cloud utilities.  NumPy keeps this package usable on
+the robot host without adding PyTorch/PyTorch3D to the base dependencies.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+def farthest_point_sample(
+    points: NDArray,
+    num_points: int,
+    *,
+    seed: int = 0,
+    candidate_limit: int | None = None,
+) -> NDArray[np.float32]:
+    """Sample a fixed-size point set with deterministic Euclidean FPS.
+
+    The geometry is taken from the first three columns (XYZ); additional
+    columns such as RGB follow the selected points.  A deterministic
+    subsampling limit keeps the quadratic CPU loop bounded for dense depth
+    images, matching the practical RL-100/DP3 preprocessing pattern.
+    """
+
+    value = np.asarray(points, dtype=np.float32)
+    if value.ndim != 2 or value.shape[1] < 3:
+        raise ValueError(f"points must have shape (N, >=3), got {value.shape}")
+    if not np.isfinite(value).all():
+        raise ValueError("points must contain only finite values")
+    if num_points <= 0:
+        raise ValueError("num_points must be positive")
+    if candidate_limit is not None and candidate_limit < num_points:
+        raise ValueError("candidate_limit must be >= num_points")
+    if value.shape[0] == 0:
+        raise ValueError("points must not be empty")
+
+    if candidate_limit is not None and value.shape[0] > candidate_limit:
+        candidate_indices = np.linspace(0, value.shape[0] - 1, candidate_limit, dtype=np.int64)
+        value = value[candidate_indices]
+
+    if value.shape[0] <= num_points:
+        if value.shape[0] == num_points:
+            return np.ascontiguousarray(value)
+        rng = np.random.default_rng(seed)
+        padding = rng.choice(value.shape[0], num_points - value.shape[0], replace=True)
+        return np.ascontiguousarray(np.concatenate((value, value[padding]), axis=0))
+
+    rng = np.random.default_rng(seed)
+    selected = np.empty(num_points, dtype=np.int64)
+    selected[0] = int(rng.integers(value.shape[0]))
+    geometry = value[:, :3]
+    distances = np.full(value.shape[0], np.inf, dtype=np.float32)
+    for index in range(1, num_points):
+        current = geometry[selected[index - 1]]
+        distances = np.minimum(distances, np.sum((geometry - current) ** 2, axis=1))
+        selected[index] = int(np.argmax(distances))
+    return np.ascontiguousarray(value[selected])
+
+
+def _voxel_representatives(
+    points: NDArray[np.floating],
+    voxel_size: float,
+    *,
+    origin: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Return one real point nearest the center of each occupied voxel."""
+
+    value = np.asarray(points, dtype=np.float32)
+    keys = np.floor((value[:, :3] - origin) / float(voxel_size)).astype(np.int64)
+    packed = keys.view(np.dtype((np.void, keys.dtype.itemsize * 3))).reshape(-1)
+    unique_packed, inverse = np.unique(packed, return_inverse=True)
+    unique_keys = unique_packed.view(keys.dtype).reshape(-1, 3)
+    centers = origin + (unique_keys.astype(np.float32) + 0.5) * float(voxel_size)
+    distance = np.sum((value[:, :3] - centers[inverse]) ** 2, axis=1)
+    # Sorting by voxel id and then distance makes the first entry of each
+    # group the nearest *measured* point, rather than a synthetic centroid.
+    order = np.lexsort((distance, inverse))
+    ordered_groups = inverse[order]
+    first = order[np.r_[True, ordered_groups[1:] != ordered_groups[:-1]]]
+    return np.ascontiguousarray(value[first])
+
+
+def _occupied_voxel_count(
+    points: NDArray[np.float32],
+    voxel_size: float,
+    *,
+    origin: NDArray[np.float32],
+) -> int:
+    keys = np.floor((points - origin) / float(voxel_size)).astype(np.int64)
+    packed = keys.view(np.dtype((np.void, keys.dtype.itemsize * 3))).reshape(-1)
+    return int(np.unique(packed).size)
+
+
+def adaptive_voxel_sample(
+    points: NDArray,
+    num_points: int,
+    *,
+    seed: int = 0,
+    max_iterations: int = 4,
+) -> NDArray[np.float32]:
+    """Downsample XYZ points to exactly ``num_points`` with an adaptive grid.
+
+    The voxel edge length is selected by a few fast surface-density updates
+    (``s <- s * sqrt(occupied / target)``), which avoids the many full
+    ``np.unique`` passes required by a strict binary search.  One measured
+    point nearest each voxel center is retained, then the representatives are
+    uniformly thinned if the count is larger than the target.  If the input has
+    fewer unique points, deterministic seeded repetition is used as a last
+    resort.
+    """
+
+    value = np.asarray(points, dtype=np.float32)
+    if value.ndim != 2 or value.shape[1] < 3:
+        raise ValueError(f"points must have shape (N, >=3), got {value.shape}")
+    if not np.isfinite(value).all():
+        raise ValueError("points must contain only finite values")
+    if num_points <= 0:
+        raise ValueError("num_points must be positive")
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be positive")
+    if value.shape[0] == 0:
+        raise ValueError("points must not be empty")
+
+    geometry = np.ascontiguousarray(value[:, :3], dtype=np.float32)
+    if geometry.shape[0] <= num_points:
+        if geometry.shape[0] == num_points:
+            return geometry
+        rng = np.random.default_rng(seed)
+        padding = rng.choice(geometry.shape[0], num_points - geometry.shape[0], replace=True)
+        return np.ascontiguousarray(np.concatenate((geometry, geometry[padding]), axis=0))
+
+    origin = geometry.min(axis=0)
+    span = geometry.max(axis=0) - origin
+    max_span = float(np.max(span))
+    if not np.isfinite(max_span) or max_span <= 1e-8:
+        return np.repeat(geometry[:1], num_points, axis=0)
+
+    # For a depth image the occupied cells mostly lie on surfaces, so the
+    # occupied count scales approximately with 1 / s² rather than 1 / s³.
+    voxel_size = max_span / math.sqrt(float(num_points))
+    count = 0
+    for _ in range(max_iterations):
+        count = _occupied_voxel_count(geometry, voxel_size, origin=origin)
+        if count == 0 or count == num_points:
+            break
+        voxel_size = max(voxel_size * math.sqrt(count / float(num_points)), max_span * 1e-7)
+    # The update above changes the edge length; refresh the count so the
+    # representative pass and the boundary correction use the same grid.
+    count = _occupied_voxel_count(geometry, voxel_size, origin=origin)
+
+    # Ensure the representative set is not below target when the inexpensive
+    # fixed iteration budget lands just on the wrong side of a voxel boundary.
+    for _ in range(3):
+        if count >= num_points:
+            break
+        voxel_size = max(voxel_size * 0.92, max_span * 1e-7)
+        count = _occupied_voxel_count(geometry, voxel_size, origin=origin)
+
+    representatives = _voxel_representatives(geometry, voxel_size, origin=origin)
+    if representatives.shape[0] > num_points:
+        # The voxel-key order is spatially stable; linspace keeps coverage
+        # across the whole workspace without the quadratic cost of FPS.
+        indices = (np.arange(num_points, dtype=np.int64) * representatives.shape[0]) // num_points
+        representatives = representatives[indices]
+    if representatives.shape[0] < num_points:
+        rng = np.random.default_rng(seed)
+        padding = rng.choice(representatives.shape[0], num_points - representatives.shape[0], replace=True)
+        representatives = np.concatenate((representatives, representatives[padding]), axis=0)
+    return np.ascontiguousarray(representatives[:, :3], dtype=np.float32)
 
 
 def _as_vec3(value: Sequence[float] | NDArray[np.floating] | None, name: str) -> NDArray | None:

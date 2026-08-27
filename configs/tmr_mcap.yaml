@@ -56,7 +56,8 @@ mcap:
     - /head_camera/zed/depth/depth_registered
     - /head_camera/zed/rgb/color/rect/camera_info
 
-    # Dual D405 color only. D405 depth topics are intentionally excluded.
+    # Dual D405 color only. Apply the host-driver profile 480x270x30 before
+    # recording; D405 depth topics are intentionally excluded.
     - /wrist_camera_left/color/image_raw
     - /wrist_camera_left/color/camera_info
     - /wrist_camera_right/color/image_raw

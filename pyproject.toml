@@ -31,6 +31,7 @@ franka-duo-arm-rate-relay = "franka_duo_tele_data.arm_rate_relay:main"
 franka-duo-mcap-record = "franka_duo_tele_data.mcap_recorder:main"
 franka-duo-eval = "franka_duo_tele_data.eval_franka_duo:main"
 franka-duo-export-bundle = "franka_duo_tele_data.export_rl100_eval_bundle:main"
+franka-duo-mcap-to-lerobot = "franka_duo_tele_data.mcap_to_lerobot:main"
 
 [project.optional-dependencies]
 # ROS 2 Python messages come from the sourced robot-host installation, not PyPI.
@@ -41,6 +42,14 @@ eval = [
 # Add this only for exported LeRobot policies. Native RL-100 bundles need eval only.
 lerobot-policy = [
     "lerobot[dp3] @ https://github.com/game-loader/lerobot_droid/archive/0bab8685280cf53f40f1a4a03b6ff213d7ab8b94.tar.gz ; python_version >= '3.12'",
+]
+postprocess = [
+    "av>=12.0.0,<18.0.0",
+    "mcap>=1.4.0,<2.0.0",
+    "pandas>=2.0.0,<3.0.0",
+    "pyarrow>=14.0.0,<24.0.0",
+    "rosbags>=0.10.9,<0.11.0",
+    "usd-core>=24.0,<26.0",
 ]
 dev = [
     "pytest>=8.1.0,<9.0.0",

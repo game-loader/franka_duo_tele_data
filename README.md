@@ -60,7 +60,7 @@ rosbag2；end 边界、outcome 和可选 reward 随后写入 bag 外的 dataset/
 | ZED-M RGB | `/head_camera/zed/rgb/color/rect/image` (`640x360`) |
 | ZED-M registered depth | `/head_camera/zed/depth/depth_registered` (`640x360`) |
 | ZED-M CameraInfo | `/head_camera/zed/rgb/color/rect/camera_info` |
-| 双 D405 RGB | `/wrist_camera_left/color/image_raw`、右侧同名 topic |
+| 双 D405 RGB | `/wrist_camera_left/color/image_raw`、右侧同名 topic (`480x270@30`) |
 | 双 D405 CameraInfo | `/wrist_camera_left/color/camera_info`、右侧同名 topic |
 | 可用 TF | `/tf`、`/tf_static` |
 
@@ -92,10 +92,49 @@ D405 depth 明确不录。`/tf` 和 `/tf_static` 用于保留可能存在的离�
 不保证现场发布了完整且正确标定的 head-optical 到 robot-base 树。录后必须检查 bag 中的
 TF；缺失时使用单独标定的静态外参，不能把 camera-frame 点云称为 base/world 点云。
 
-当前 ZED RGB 和 registered depth 配置为 `640x360@15`；D405 driver 当前是 `640x480@30`。
-MCAP 保留各自原始频率，
-不会把 wrist 降成“逻辑 15 FPS”。如果现场改 D405 为 `480x270@30`，只修改 driver；原始
-recorder 不做尺寸假设，CameraInfo 和图像会原样进入 bag。
+当前 ZED RGB 和 registered depth 配置为 `640x360@15`；D405 driver 的目标采集 profile 为
+`480x270@30`。MCAP 保留各自原始频率，不会把 wrist 降成“逻辑 15 FPS”。尺寸和 profile
+必须在相机 driver 端设置，原始 recorder 不做尺寸假设，CameraInfo 和图像会原样进入 bag。
+这个 profile 变化应从旧的 `franka_duo_tmr_raw_v1` 作为新数据版本验收，不能覆盖旧 bag。
+
+### D405 主机端 Profile
+
+仓库脚本不会启动或重配置 RealSense 节点。请在现场已有的 `launch_d405_duo.sh` 或等价的
+`rs_multi_camera_launch.py` 调用中，保留实际 serial/name/namespace 映射，并设置下面四个
+参数：
+
+```text
+depth_module.color_profile1:=480x270x30
+depth_module.color_profile2:=480x270x30
+enable_depth1:=false
+enable_depth2:=false
+```
+
+Jazzy 多相机 launch 的参数检查可能把这些参数误报为“不支持”；以实际启动日志和 topic
+为准。开始录制前确认尺寸、编码和频率：
+
+```bash
+ros2 topic echo /wrist_camera_left/color/image_raw --once | grep -E 'height|width|encoding|step'
+ros2 topic echo /wrist_camera_right/color/image_raw --once | grep -E 'height|width|encoding|step'
+ros2 topic hz /wrist_camera_left/color/image_raw
+ros2 topic hz /wrist_camera_right/color/image_raw
+```
+
+### 图像压缩边界
+
+`zstd_fast` 只压缩 MCAP chunk；raw 录制不会在线解码或重新编码相机消息。JPEG 是有损的，
+可选方案如下：
+
+| 方案 | 是否无损 | 适用范围和限制 |
+|---|---|---|
+| PNG | 是 | RGB 可直接无损；对噪声图像仍可能较大。深度通常要求 `16UC1`。 |
+| WebP lossless | 是 | RGB 可能比 PNG 更小，但当前 ROS 现场没有标准 WebP transport，适合离线派生。 |
+| TIFF/EXR | 是 | 可保存 `32FC1` 浮点深度；不是当前 ROS 直录格式，适合离线 sidecar。 |
+| FFV1 / lossless H.264/H.265 | 是 | 视频级压缩，需要重组帧和时间戳，只能做离线视频派生。 |
+| zstd/LZ4 | 是 | 对当前 `32FC1` 和 RGB raw 的额外收益有限，MCAP 已经使用 zstd。 |
+
+如果必须保持 `v1` raw contract，以上编码都不要放进 recorder。推荐保留原始 MCAP，离线
+生成 PNG/WebP/视频派生集；若允许新的相机数据版本，再评估 driver 原生 compressed topic。
 
 TMR 没有经过验证的周期 spine state/target topic，所以默认清单不录 spine。也不录 base
 速度、里程计或 D405 depth。要扩大原始证据面，应先版本化修改 `tmr_mcap.yaml`，不要在
@@ -111,7 +150,7 @@ git clone git@github.com:game-loader/franka_duo_tele_data.git
 cd franka_duo_tele_data
 
 # 默认原始 MCAP recorder；兼容 RL-100 的 Python 3.10 / NumPy 1.23.5 环境
-uv sync --extra record
+uv sync --frozen --no-default-groups --extra record
 ```
 
 ROS 依赖由系统安装，不从 PyPI 获取。以 Jazzy 为例，缺少 plugin 时安装对应发行版包：
@@ -285,19 +324,99 @@ FRANKA_MCAP_CONFIG="$PWD/configs/my_site_mcap.yaml" ./scripts/run_recorder.sh
 ## 离线 LeRobot v3 后处理契约
 
 原始 MCAP 不是 LeRobot dataset。转换必须在采集后完成，建议不可变保留 raw bag，并将
-派生 LeRobot v3 写到另一目录。**当前仓库尚未提供 MCAP -> LeRobot v3 转换命令**；
-转换器将在后续作为独立的离线工作实现，且必须遵循以下顺序：
+派生 LeRobot v3 写到另一目录。转换器是独立的离线步骤，不会改写 raw bag：
+
+```bash
+uv run --extra postprocess franka-duo-mcap-to-lerobot \
+  --input-root /Users/logicluo/Downloads/franka_duo_tmr_raw_v1 \
+  --output /data/franka_duo_tmr_lerobot_v3 \
+  --usd /path/to/benchmark/assets/mobile_fr3_duo_v0_2.usd \
+  --fps 15 --num-points 2048 --sampling adaptive --channels 3 \
+  --workspace-min 0.4,-0.3,-0.3 --workspace-max 1.2,0.3,0.3 \
+  --min-depth 0.05 --max-depth 5.0
+```
+
+`postprocess` extra 只安装 `rosbags`、`mcap`、`usd-core`、`pyarrow`、`pandas` 和 `av`，不会进入
+现场 recorder 的基础环境。转换器按下面的顺序执行：
 
 1. 读取 rosbag receipt timestamp 和原消息 `header.stamp`，验证每个 required topic 数量、
    时间单调性、消息类型、尺寸和 CameraInfo；
 2. 用 `episode_event` 验证 start，用 manifest 验证 end/outcome/reward，不把元数据时间当图像时间；
 3. 用新的 head RGB header stamp 作为目标帧，按明确阈值匹配 registered depth、左右 wrist、
    rate100 relay 中的 current pose、measured joints 和夹爪实际状态；这些状态使用保留的
-   source header stamp，缺失时使用 relay receipt timestamp；
+   source header stamp，缺失时使用 relay receipt timestamp。有效同步帧随后按 `--fps` 固定
+   时间网格抽样，避免旧 bag 中约 24.2 Hz 的 ZED 源帧被错误标成 15 Hz；每个抽样帧仍保留
+   自己的 source stamp/skew；
 4. 按训练任务明确选择并版本化 action/state 表示，记录每个派生帧对应的所有 source
    timestamp 和 skew；
-5. 编码三路 RGB，保存与 head RGB 一一对应的深度/标定 sidecar，写 LeRobot v3；
-6. 严格验收派生集后，再使用 URDF/mount transform 离线 FK。
+5. 将三路 RGB 编为 `videos/<feature>/chunk-000/file-000.mp4`，低维数据写入
+   `data/chunk-000/file-000.parquet`，并生成标准 `meta/info.json`、`stats.json`、
+   `tasks.parquet` 和 `meta/episodes/...parquet`；
+6. 同时写 `meta/derived_manifest.json`，其中保存 source stamp/skew 所在字段的定义、drop
+   统计、点云参数、夹爪标定和全部固定坐标矩阵；每帧实际的 timestamp/skew 保存在 Parquet
+   的 `observation.source_timestamp_ns` 和 `observation.sync_skew_ns` 列。
+
+### 点云与坐标变换
+
+`mobile_fr3_duo_v0_2.usd` 中已确认：`/left_fr3v2_link0` 和 `/right_fr3v2_link0` 的
+世界坐标分别为 `(0.44190, +0.05018, 0.500885)` 和 `(0.44190, -0.05018, 0.500885)`。
+所以新 `base` 取两者原点中点 `(0.44190, 0, 0.500885)`，方向采用 USD 根坐标方向；不对
+左右镜像四元数做平均。USD 没有 ZED prim，转换器使用 `/head_camera_mounting_point` 作为
+ZED 安装点，并把 ROS optical 约定 `(x right, y down, z forward)` 的
+`mount -> zed_left_camera_frame_optical` 作为默认 nominal 外参。现场完成标定后可用
+`--mount-to-optical m00,...,m33` 覆盖，覆盖矩阵会原样写进 derived manifest。
+
+对样例 `franka_duo_tmr_raw_v1` 的 `/tf` 和 `/tf_static` 检查得到四个不连通组件：
+机器人主体（`base`、双臂和移动底盘）、Robotiq 夹爪、双 D405 wrist 相机、ZED 相机链。
+ZED 链只有 `zed_camera_link -> zed_camera_center -> zed_left/right_camera_frame(_optical)`，
+没有 `base` 或 `head` 到 `zed_camera_link` 的边；wrist 链也没有接到机械臂。故这份 bag 的
+TF 不能直接提供相机到新 base 的外参，转换器使用 USD nominal 矩阵，实机训练前应以测量的
+静态外参替换。
+
+代码中所有矩阵均为列向量约定：
+
+```text
+T_A_from_C = T_A_from_B @ T_B_from_C
+p_A = T_A_from_C @ [p_C, 1]
+```
+
+参考实现为 [RL100](https://github.com/Starsshine21/RL100) 的
+`3D-Diffusion-Policy/diffusion_policy_3d/gym_util/mujoco_point_cloud.py` 和
+`gym_util/mjpc_wrapper.py`。每帧先用 ZED `CameraInfo.k` 将 registered `depth/depth_registered` 解投影到 ZED optical
+系，得到 XYZ，再乘 `T_newbase_from_zed_optical`，并按 base 工作空间
+`x∈[0.4,1.2]、y,z∈[-0.3,0.3]` 裁剪。默认使用自适应 voxel：自动选择体素边长，
+每个体素保留距离体素中心最近的真实 XYZ 点，再做空间均匀删减，最终每帧精确输出
+`2048×3`；不保存 RGB 点云信息。需要对照 RL100 的 FPS 时仍可显式指定
+`--sampling fps`，但它的 CPU 成本更高。
+
+双臂 `current_pose` 按用户约定视为各自 Franka base link 下的末端 pose，先转为
+`T_armbase_from_ee`，再计算：
+
+```text
+T_newbase_from_ee = T_newbase_from_armbase @ T_armbase_from_ee
+```
+
+样例 v1 bag 中两路 `current_pose.header.frame_id` 都观测为 `base`，这只是驱动写入的字符串，
+不能单独证明两路 payload 都已经在同一个物理 frame。转换器按左右 topic 的约定分别应用
+对应 arm-base 变换；现场应核对驱动语义，必要时用标定矩阵修正，不能把不同 frame 的 pose
+直接拼接。输出中的 `observation.ee_pose` 是左右各 `xyz + rot6d_rows` 的 18D 向量；
+`rot6d_rows` 是每个 3×3 旋转矩阵前两行按行展平的连续 6D 表示。没有在线 FK，也不使用
+measured joints 伪造末端 pose。
+
+### 对齐、state 与 action
+
+每个候选帧的时间轴是 ZED RGB 的 `header.stamp`。转换器从有界时间缓存中匹配最近的 depth、
+左右 wrist RGB、左右 current pose、左右 measured joints 和左右 gripper state；带 header
+的 topic 使用 header stamp，无 header 时使用 rosbag receipt timestamp。匹配阈值由
+`--rgb-tolerance-ms`、`--depth-tolerance-ms`、`--state-tolerance-ms` 控制，结果的 9 路
+skew 会保存为 `observation.sync_skew_ns`。匹配成功后以首个有效帧为起点，按 `--fps` 的
+固定网格保留每个网格之后的第一帧；被丢弃的源帧计入 `dropped_resampled`，输出 Parquet/video
+的 `timestamp` 始终是连续的 `frame_index / fps`。
+
+`observation.state` 是 16D measured state：左 7 个关节、右 7 个关节、左右 actual
+gripper open fraction。`action` 是 15Hz 重采样后下一个**有效同步帧**的 18D 双臂相对新
+base 末端 pose，旋转使用 `rot6d_rows`；最后一个没有下一帧的候选会丢弃。raw bag 没有 gripper target，故
+不会把 actual gripper state 冒充 action，也不会恢复旧的 20D/16D action contract。
 
 `desired_joint_states` 因现场不变化而明确不录。因此这些 MCAP **不能**恢复旧的 16D
 desired-joint action，转换器也不得复制 measured joints、填零或前向填充来伪造它。当前每侧
@@ -312,9 +431,10 @@ horizon 和归一化，再写入派生数据 manifest。
 不得用 actual state 冒充 target。
 
 转换器必须显式记录同步策略、阈值、drop/missing 统计、夹爪 joint 选择与两侧各自标定，不得
-用 measured state 冒充 action，也不得为 spine/base/world EE 填零。双臂 EE 位姿应在后处理
-阶段用真实 URDF 和静态 mount transform 做 FK；除非整条外参链已校准并验证，否则不能称为
-world pose。
+用 measured state 冒充 action，也不得为 spine/base/world EE 填零。当前后处理直接使用录制的
+`current_pose`，在确认其语义为各自 Franka base link 后乘以 USD 静态变换；若现场只有关节
+状态，则应另行用真实 URDF 做 FK。除非整条相机外参链已校准并验证，否则不能把 nominal
+转换结果称为精确 world pose。
 
 ## 模型 Bundle 与 20D Action
 

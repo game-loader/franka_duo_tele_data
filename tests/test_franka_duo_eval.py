@@ -85,12 +85,15 @@ def test_rot6d_contract_matches_rl100_rows():
     np.testing.assert_allclose(rot6d_to_matrix(six), matrix, atol=1e-6)
 
 
-def test_tmr_eval_config_uses_current_zed_resolution():
+def test_tmr_eval_config_uses_current_camera_resolutions():
     config = load_eval_config(Path(__file__).resolve().parents[1] / "configs" / "tmr_eval.yaml")
 
     assert config.cameras["head"].width == 640
     assert config.cameras["head"].height == 360
     assert config.cameras["head"].fps == 15
+    for key in ("wrist_left", "wrist_right"):
+        assert config.cameras[key].width == 480
+        assert config.cameras[key].height == 270
 
 
 def test_action_spec_rejects_bad_rotation_and_workspace():

@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from .pointcloud import depth_to_point_cloud
+from .pointcloud import depth_to_point_cloud, farthest_point_sample
 from .ros_utils import (
     _joint_map,
     _stamp_ns,
@@ -234,27 +234,6 @@ def _nearest(values: Sequence[TimedValue], target_ns: int, tolerance_ns: int) ->
     return best
 
 
-def _farthest_point_sample(points: np.ndarray, num_points: int, seed: int) -> np.ndarray:
-    """Deterministic CPU FPS with a bounded candidate set for 30 Hz live use."""
-
-    if points.shape[0] <= num_points:
-        if points.shape[0] == num_points:
-            return points
-        rng = np.random.default_rng(seed)
-        padding = rng.choice(points.shape[0], num_points - points.shape[0], replace=True)
-        return np.concatenate((points, points[padding]), axis=0)
-    rng = np.random.default_rng(seed)
-    selected = np.empty(num_points, dtype=np.int64)
-    selected[0] = int(rng.integers(points.shape[0]))
-    geometry = points[:, :3]
-    distances = np.full(points.shape[0], np.inf, dtype=np.float32)
-    for index in range(1, num_points):
-        current = geometry[selected[index - 1]]
-        distances = np.minimum(distances, np.sum((geometry - current) ** 2, axis=1))
-        selected[index] = int(np.argmax(distances))
-    return np.ascontiguousarray(points[selected])
-
-
 def make_point_cloud(
     depth_m: np.ndarray,
     head_rgb: np.ndarray,
@@ -315,12 +294,12 @@ def make_point_cloud(
         max_depth=config.max_depth,
         num_points=None,
     )
-    if all_points.shape[0] > config.fps_candidate_limit:
-        candidate_indices = np.linspace(
-            0, all_points.shape[0] - 1, config.fps_candidate_limit, dtype=np.int64
-        )
-        all_points = all_points[candidate_indices]
-    return _farthest_point_sample(all_points, config.num_points, seed)
+    return farthest_point_sample(
+        all_points,
+        config.num_points,
+        seed=seed,
+        candidate_limit=config.fps_candidate_limit,
+    )
 
 
 class SynchronizedObservationReader:
