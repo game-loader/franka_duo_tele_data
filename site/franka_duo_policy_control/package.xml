@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>franka_duo_policy_control</name>
+  <version>0.1.0</version>
+  <description>Site-owned safety relay and Cartesian controller for a Franka Duo policy.</description>
+  <maintainer email="maintainers@example.invalid">Franka Duo maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>controller_interface</depend>
+  <depend>eigen3_cmake_module</depend>
+  <depend>franka_semantic_components</depend>
+  <depend>hardware_interface</depend>
+  <depend>geometry_msgs</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>realtime_tools</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <controller_interface plugin="${prefix}/franka_duo_policy_control.xml"/>
+  </export>
+</package>

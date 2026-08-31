@@ -1,0 +1,10 @@
+<library path="policy_cartesian_controllers">
+  <class
+    name="franka_duo_policy_control/PolicyCartesianPoseController"
+    type="franka_duo_policy_control::PolicyCartesianPoseController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Official Franka Cartesian pose controller for policy pose targets.
+    </description>
+  </class>
+</library>

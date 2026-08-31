@@ -1,0 +1,28 @@
+/**:
+  joint_trajectory_controller:
+    ros__parameters:
+      type: joint_trajectory_controller/JointTrajectoryController
+      joints:
+        - left_fr3v2_joint1
+        - left_fr3v2_joint2
+        - left_fr3v2_joint3
+        - left_fr3v2_joint4
+        - left_fr3v2_joint5
+        - left_fr3v2_joint6
+        - left_fr3v2_joint7
+      command_interfaces:
+        - position
+      state_interfaces:
+        - position
+        - velocity
+      state_publish_rate: 50.0
+      action_monitor_rate: 20.0
+      allow_partial_joints_goal: false
+      open_loop_control: false
+      interpolate_from_desired_state: true
+      set_last_command_interface_value_as_state_on_activation: true
+      interpolation_method: splines
+      allow_nonzero_velocity_at_trajectory_end: false
+      constraints:
+        stopped_velocity_tolerance: 0.05
+        goal_time: 0.0

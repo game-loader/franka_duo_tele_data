@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from .pointcloud import depth_to_point_cloud, farthest_point_sample
+from .pointcloud import adaptive_voxel_sample, depth_to_point_cloud, farthest_point_sample
 from .ros_utils import (
     _joint_map,
     _stamp_ns,
@@ -71,8 +71,8 @@ class PointCloudConfig:
             raise ValueError("pointcloud.num_points must be positive")
         if self.channels not in (3, 6):
             raise ValueError("pointcloud.channels must be 3 (XYZ) or 6 (XYZRGB)")
-        if self.sampling not in {"random", "fps"}:
-            raise ValueError("pointcloud.sampling must be 'random' or 'fps'")
+        if self.sampling not in {"adaptive", "random", "fps"}:
+            raise ValueError("pointcloud.sampling must be 'adaptive', 'random' or 'fps'")
         if not 0 <= self.min_depth < self.max_depth:
             raise ValueError("pointcloud requires 0 <= min_depth < max_depth")
         if self.workspace_min is not None or self.workspace_max is not None:
@@ -294,12 +294,9 @@ def make_point_cloud(
         max_depth=config.max_depth,
         num_points=None,
     )
-    return farthest_point_sample(
-        all_points,
-        config.num_points,
-        seed=seed,
-        candidate_limit=config.fps_candidate_limit,
-    )
+    if config.sampling == "adaptive":
+        return adaptive_voxel_sample(all_points, config.num_points, seed=seed)
+    return farthest_point_sample(all_points, config.num_points, seed=seed, candidate_limit=config.fps_candidate_limit)
 
 
 class SynchronizedObservationReader:

@@ -129,6 +129,34 @@ def test_pointcloud_supports_xyz_and_xyzrgb_and_fps():
         make_point_cloud(depth, rgb[:-1], info, PointCloudConfig(num_points=4))
 
 
+def test_pointcloud_supports_adaptive_xyz_sampling():
+    width, height = 8, 6
+    depth = np.ones((height, width), dtype=np.float32)
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    rgb[..., 1] = 127
+    info = _camera_info(width, height, 1)
+
+    points = make_point_cloud(
+        depth,
+        rgb,
+        info,
+        PointCloudConfig(num_points=12, sampling="adaptive", min_depth=0.1),
+    )
+
+    assert points.shape == (12, 3)
+    assert np.isfinite(points).all()
+
+    color_points = make_point_cloud(
+        depth,
+        rgb,
+        info,
+        PointCloudConfig(num_points=12, channels=6, sampling="adaptive", min_depth=0.1),
+    )
+
+    assert color_points.shape == (12, 6)
+    assert np.isfinite(color_points).all()
+
+
 def test_ros_reader_anchors_head_stamp_and_matches_depth_and_wrists():
     width, height = 8, 6
     cameras = {

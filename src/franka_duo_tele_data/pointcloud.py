@@ -120,7 +120,7 @@ def adaptive_voxel_sample(
     seed: int = 0,
     max_iterations: int = 4,
 ) -> NDArray[np.float32]:
-    """Downsample XYZ points to exactly ``num_points`` with an adaptive grid.
+    """Downsample points to exactly ``num_points`` with an adaptive grid.
 
     The voxel edge length is selected by a few fast surface-density updates
     (``s <- s * sqrt(occupied / target)``), which avoids the many full
@@ -128,7 +128,7 @@ def adaptive_voxel_sample(
     point nearest each voxel center is retained, then the representatives are
     uniformly thinned if the count is larger than the target.  If the input has
     fewer unique points, deterministic seeded repetition is used as a last
-    resort.
+    resort. Any extra per-point columns, such as RGB, are preserved.
     """
 
     value = np.asarray(points, dtype=np.float32)
@@ -143,13 +143,14 @@ def adaptive_voxel_sample(
     if value.shape[0] == 0:
         raise ValueError("points must not be empty")
 
-    geometry = np.ascontiguousarray(value[:, :3], dtype=np.float32)
+    samples = np.ascontiguousarray(value, dtype=np.float32)
+    geometry = samples[:, :3]
     if geometry.shape[0] <= num_points:
         if geometry.shape[0] == num_points:
-            return geometry
+            return samples
         rng = np.random.default_rng(seed)
         padding = rng.choice(geometry.shape[0], num_points - geometry.shape[0], replace=True)
-        return np.ascontiguousarray(np.concatenate((geometry, geometry[padding]), axis=0))
+        return np.ascontiguousarray(np.concatenate((samples, samples[padding]), axis=0))
 
     origin = geometry.min(axis=0)
     span = geometry.max(axis=0) - origin
@@ -178,7 +179,7 @@ def adaptive_voxel_sample(
         voxel_size = max(voxel_size * 0.92, max_span * 1e-7)
         count = _occupied_voxel_count(geometry, voxel_size, origin=origin)
 
-    representatives = _voxel_representatives(geometry, voxel_size, origin=origin)
+    representatives = _voxel_representatives(samples, voxel_size, origin=origin)
     if representatives.shape[0] > num_points:
         # The voxel-key order is spatially stable; linspace keeps coverage
         # across the whole workspace without the quadratic cost of FPS.
@@ -188,7 +189,7 @@ def adaptive_voxel_sample(
         rng = np.random.default_rng(seed)
         padding = rng.choice(representatives.shape[0], num_points - representatives.shape[0], replace=True)
         representatives = np.concatenate((representatives, representatives[padding]), axis=0)
-    return np.ascontiguousarray(representatives[:, :3], dtype=np.float32)
+    return np.ascontiguousarray(representatives, dtype=np.float32)
 
 
 def _as_vec3(value: Sequence[float] | NDArray[np.floating] | None, name: str) -> NDArray | None:
