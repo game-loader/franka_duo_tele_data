@@ -37,6 +37,12 @@ from .ros_utils import depth_msg_to_meters, gripper_open_fraction, image_msg_to_
 DEFAULT_WORKSPACE_MIN = (0.4, -0.3, -0.3)
 DEFAULT_WORKSPACE_MAX = (1.2, 0.3, 0.3)
 WRIST_IMAGE_SIZE = (256, 256)
+# The dual-arm Cartesian target has nine values per arm (XYZ + continuous
+# rotation-6D).  The two gripper values are appended in the same order as the
+# state fields and are taken from the *next* synchronized frame, exactly like
+# the pose portion of the action.
+EE_ACTION_DIM = 18
+ACTION_DIM = 20
 DEFAULT_TOPICS = {
     "head_rgb": "/head_camera/zed/rgb/color/rect/image",
     "head_depth": "/head_camera/zed/depth/depth_registered",
@@ -106,7 +112,9 @@ def quaternion_to_matrix(quaternion: Sequence[float] | Any) -> np.ndarray:
     return matrix.astype(np.float32)
 
 
-def make_transform(translation: Sequence[float], rotation: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+def make_transform(
+    translation: Sequence[float], rotation: Sequence[Sequence[float]] | np.ndarray
+) -> np.ndarray:
     """Construct a homogeneous column-vector transform ``T_parent_child``."""
 
     position = _finite_vec(translation, 3, "translation")
@@ -197,7 +205,9 @@ def resize_rgb(image: np.ndarray, size: tuple[int, int] = WRIST_IMAGE_SIZE) -> n
     return np.ascontiguousarray(value[row_indices[:, None], column_indices[None, :], :])
 
 
-def midpoint_base(left_world: np.ndarray, right_world: np.ndarray, rotation: np.ndarray | None = None) -> np.ndarray:
+def midpoint_base(
+    left_world: np.ndarray, right_world: np.ndarray, rotation: np.ndarray | None = None
+) -> np.ndarray:
     """Create a base at the midpoint of two arm-base origins.
 
     The default orientation is the USD root/world orientation.  The two arm
@@ -292,7 +302,9 @@ def load_usd_geometry(
     stage = Usd.Stage.Open(str(path))
     if stage is None:
         raise ValueError(f"Unable to open USD asset: {path}")
-    root = next((p for p in stage.GetPseudoRoot().GetChildren() if p.GetName().startswith("mobile_fr3_duo")), None)
+    root = next(
+        (p for p in stage.GetPseudoRoot().GetChildren() if p.GetName().startswith("mobile_fr3_duo")), None
+    )
     if root is None:
         root = stage.GetPseudoRoot()
     left = _find_usd_prim(stage, root, ("left_fr3v2_link0", "left_base"))
@@ -339,7 +351,9 @@ def load_usd_geometry(
         new_base_world=base_world,
         base_from_left_arm=compose_transform(base_from_world, left_world),
         base_from_right_arm=compose_transform(base_from_world, right_world),
-        base_from_zed_optical=compose_transform(base_from_world, compose_transform(mount_world, mount_optical)),
+        base_from_zed_optical=compose_transform(
+            base_from_world, compose_transform(mount_world, mount_optical)
+        ),
         left_prim=str(left.GetPath()),
         right_prim=str(right.GetPath()),
         mount_prim=str(mount.GetPath()),
@@ -434,6 +448,10 @@ class DerivedFrame:
     ee_pose: np.ndarray
     left_pose_frame_id: str | None = None
     right_pose_frame_id: str | None = None
+    # Normalized open fractions for the two grippers.  This is kept separately
+    # from ``state`` so action construction cannot accidentally use stale
+    # state values when the representation evolves.
+    gripper: np.ndarray | None = None
 
 
 def _joint_positions(message: Any, side: str, expected: int = 7) -> np.ndarray:
@@ -528,7 +546,9 @@ class VideoWriter:
     def write(self, rgb: np.ndarray) -> None:
         value = np.asarray(rgb, dtype=np.uint8)
         if value.shape != (self.stream.height, self.stream.width, 3):
-            raise ValueError(f"RGB frame shape {value.shape} does not match video {(self.stream.height, self.stream.width, 3)}")
+            raise ValueError(
+                f"RGB frame shape {value.shape} does not match video {(self.stream.height, self.stream.width, 3)}"
+            )
         av = _optional_dependency("av")
         frame = av.VideoFrame.from_ndarray(value, format="rgb24")
         for packet in self.stream.encode(frame):
@@ -645,12 +665,25 @@ class LeRobotV3Writer:
             "right_rot6d_row1_y",
             "right_rot6d_row1_z",
         ]
-        state_names = [*(f"left_joint_{i}" for i in range(1, 8)), *(f"right_joint_{i}" for i in range(1, 8)), "left_gripper_open_fraction", "right_gripper_open_fraction"]
+        state_names = [
+            *(f"left_joint_{i}" for i in range(1, 8)),
+            *(f"right_joint_{i}" for i in range(1, 8)),
+            "left_gripper_open_fraction",
+            "right_gripper_open_fraction",
+        ]
         self.features = {
             "observation.state": {"dtype": "float32", "shape": [16], "names": state_names},
             "observation.ee_pose": {"dtype": "float32", "shape": [18], "names": vector_names},
-            "action": {"dtype": "float32", "shape": [18], "names": vector_names},
-            "observation.point_cloud": {"dtype": "float32", "shape": [self.num_points, self.channels], "names": ["x", "y", "z", "r", "g", "b"][: self.channels]},
+            "action": {
+                "dtype": "float32",
+                "shape": [ACTION_DIM],
+                "names": [*vector_names, "left_gripper_open_fraction", "right_gripper_open_fraction"],
+            },
+            "observation.point_cloud": {
+                "dtype": "float32",
+                "shape": [self.num_points, self.channels],
+                "names": ["x", "y", "z", "r", "g", "b"][: self.channels],
+            },
             "observation.source_timestamp_ns": {"dtype": "int64", "shape": [1], "names": None},
             "observation.sync_skew_ns": {
                 "dtype": "int64",
@@ -688,9 +721,7 @@ class LeRobotV3Writer:
             for key, value in self.features.items()
             if value["dtype"] != "video"
         }
-        self.video_accumulators = {
-            key: _StatsAccumulator((3, 1, 1), "float32") for key in image_shapes
-        }
+        self.video_accumulators = {key: _StatsAccumulator((3, 1, 1), "float32") for key in image_shapes}
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -732,11 +763,16 @@ class LeRobotV3Writer:
             self.video_writers[key] = writer
         return writer
 
-    def add_frame(self, frame: DerivedFrame, action: np.ndarray, episode_index: int, frame_index: int) -> None:
+    def add_frame(
+        self, frame: DerivedFrame, action: np.ndarray, episode_index: int, frame_index: int
+    ) -> None:
         self._initialize(frame)
         assert self.features is not None and self.data_writer is not None
-        if frame.ee_pose.shape != (18,) or np.asarray(action).shape != (18,):
-            raise ValueError("ee_pose and action must both have shape (18,) (dual-arm xyz + rot6d)")
+        if frame.ee_pose.shape != (EE_ACTION_DIM,) or np.asarray(action).shape != (ACTION_DIM,):
+            raise ValueError(
+                "ee_pose must have shape (18,) and action must have shape (20,) "
+                "(dual-arm xyz + rot6d + two grippers)"
+            )
         if frame.point_cloud.shape != (self.num_points, self.channels):
             raise ValueError(
                 f"point_cloud must have shape {(self.num_points, self.channels)}, got {frame.point_cloud.shape}"
@@ -782,7 +818,10 @@ class LeRobotV3Writer:
         names = ["timestamp", "frame_index", "episode_index", "index", "task_index"]
         columns.extend(
             [
-                pa.array([row[name] for row in self.data_rows], type=pa.float32() if name == "timestamp" else pa.int64())
+                pa.array(
+                    [row[name] for row in self.data_rows],
+                    type=pa.float32() if name == "timestamp" else pa.int64(),
+                )
                 for name in names
             ]
         )
@@ -795,7 +834,9 @@ class LeRobotV3Writer:
             "observation.sync_skew_ns",
         ):
             spec = self.features[key]
-            columns.append(_arrow_array([row[key] for row in self.data_rows], tuple(spec["shape"]), spec["dtype"], pa))
+            columns.append(
+                _arrow_array([row[key] for row in self.data_rows], tuple(spec["shape"]), spec["dtype"], pa)
+            )
         self.data_writer.write_table(pa.Table.from_arrays(columns, schema=self.data_writer.schema))
         self.data_rows.clear()
 
@@ -890,7 +931,11 @@ class LeRobotV3Writer:
                 row = dict(item)
                 row["sync_stats"] = json.dumps(row["sync_stats"], sort_keys=True)
                 rows.append(row)
-            pq.write_table(pa.Table.from_pylist(rows), meta / "episodes" / "chunk-000" / "file-000.parquet", compression="zstd")
+            pq.write_table(
+                pa.Table.from_pylist(rows),
+                meta / "episodes" / "chunk-000" / "file-000.parquet",
+                compression="zstd",
+            )
         stats = {key: accumulator.finish() for key, accumulator in self.accumulators.items()}
         stats.update({key: accumulator.finish() for key, accumulator in self.video_accumulators.items()})
         (meta / "stats.json").write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
@@ -1052,8 +1097,12 @@ class EpisodeConverter:
                 else:
                     pad = rng.choice(all_points.shape[0], self.num_points - all_points.shape[0], replace=True)
                     points = np.concatenate((all_points, all_points[pad]), axis=0)
-            left_pose_transform = compose_transform(self.geometry.base_from_left_arm, pose_to_transform(left_pose.message.pose))
-            right_pose_transform = compose_transform(self.geometry.base_from_right_arm, pose_to_transform(right_pose.message.pose))
+            left_pose_transform = compose_transform(
+                self.geometry.base_from_left_arm, pose_to_transform(left_pose.message.pose)
+            )
+            right_pose_transform = compose_transform(
+                self.geometry.base_from_right_arm, pose_to_transform(right_pose.message.pose)
+            )
             state = np.concatenate(
                 (
                     _joint_positions(left_joints.message, "left"),
@@ -1089,7 +1138,9 @@ class EpisodeConverter:
             "left_gripper": left_gripper,
             "right_gripper": right_gripper,
         }
-        skew = np.asarray([item.stamp_ns - target.stamp_ns for item in source_values.values()], dtype=np.int64)
+        skew = np.asarray(
+            [item.stamp_ns - target.stamp_ns for item in source_values.values()], dtype=np.int64
+        )
         stats.frames_ready += 1
         return DerivedFrame(
             source_stamp_ns=target.stamp_ns,
@@ -1099,7 +1150,10 @@ class EpisodeConverter:
             wrist_right_rgb=right_rgb,
             point_cloud=np.ascontiguousarray(points, dtype=np.float32),
             state=state,
-            ee_pose=np.concatenate((pose_vector(left_pose_transform), pose_vector(right_pose_transform))).astype(np.float32),
+            ee_pose=np.concatenate(
+                (pose_vector(left_pose_transform), pose_vector(right_pose_transform))
+            ).astype(np.float32),
+            gripper=state[-2:].copy(),
             left_pose_frame_id=str(getattr(getattr(left_pose.message, "header", None), "frame_id", "")),
             right_pose_frame_id=str(getattr(getattr(right_pose.message, "header", None), "frame_id", "")),
         )
@@ -1112,7 +1166,9 @@ class EpisodeConverter:
             raise ValueError("gripper calibration endpoints must be finite")
         return value
 
-    def convert_episode(self, episode_dir: Path, output_episode_index: int) -> tuple[SyncStats, dict[str, Any]]:
+    def convert_episode(
+        self, episode_dir: Path, output_episode_index: int
+    ) -> tuple[SyncStats, dict[str, Any]]:
         _optional_dependency("rosbags.highlevel", "rosbags.highlevel")
         from rosbags.highlevel import AnyReader  # type: ignore[import-not-found]
 
@@ -1163,7 +1219,16 @@ class EpisodeConverter:
                     if current.right_pose_frame_id:
                         pose_frame_ids["right"].add(current.right_pose_frame_id)
                     if previous is not None:
-                        self.writer.add_frame(previous, current.ee_pose, output_episode_index, stats.frames_written)
+                        # The action for frame ``previous`` is the next valid
+                        # synchronized frame's target.  Extend the historical
+                        # 18D pose target with the next frame's two normalized
+                        # gripper open fractions.
+                        if current.gripper is None or np.asarray(current.gripper).shape != (2,):
+                            raise ValueError("next synchronized frame is missing its two gripper values")
+                        next_action = np.concatenate((current.ee_pose, current.gripper)).astype(np.float32)
+                        self.writer.add_frame(
+                            previous, next_action, output_episode_index, stats.frames_written
+                        )
                         stats.frames_written += 1
                     frame_index += 1
                     previous = current
@@ -1186,7 +1251,9 @@ class EpisodeConverter:
                     stats.head_seen += 1
                     if len(pending) == pending.maxlen:
                         stats.pending_overflow += 1
-                    pending.append(TimedMessage(message_stamp_ns(message, receipt_ns), int(receipt_ns), message))
+                    pending.append(
+                        TimedMessage(message_stamp_ns(message, receipt_ns), int(receipt_ns), message)
+                    )
                 elif key in buffers:
                     buffers[key].append(message, receipt_ns)
                 flush_ready(int(receipt_ns))
@@ -1228,7 +1295,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--usd", type=Path, required=True)
     parser.add_argument("--num-points", type=int, default=2048)
-    parser.add_argument("--channels", type=int, choices=(3,), default=3, help="point-cloud channels; XYZ-only")
+    parser.add_argument(
+        "--channels", type=int, choices=(3,), default=3, help="point-cloud channels; XYZ-only"
+    )
     parser.add_argument("--sampling", choices=("adaptive", "fps", "random"), default="adaptive")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--fps-candidate-limit", type=int, default=4096)
@@ -1253,7 +1322,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gripper-closed", type=float, default=0.8)
     parser.add_argument("--gripper-open", type=float, default=0.0)
     parser.add_argument("--task", default="franka duo manipulation")
-    parser.add_argument("--mount-to-optical", type=_floats, default=None, help="nominal mount->optical 4x4 override")
+    parser.add_argument(
+        "--mount-to-optical", type=_floats, default=None, help="nominal mount->optical 4x4 override"
+    )
     parser.add_argument("--base-rotation", type=_floats, default=None, help="new base rotation 3x3 override")
     parser.add_argument("--force", action="store_true")
     return parser
@@ -1279,7 +1350,9 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
         mount_to_optical=args.mount_to_optical,
         base_rotation=args.base_rotation,
     )
-    writer = LeRobotV3Writer(args.output.expanduser().resolve(), args.fps, args.task, args.num_points, args.channels)
+    writer = LeRobotV3Writer(
+        args.output.expanduser().resolve(), args.fps, args.task, args.num_points, args.channels
+    )
     converter = EpisodeConverter(
         geometry,
         writer,
@@ -1303,12 +1376,14 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
     for episode_dir in _episode_dirs(args.input_root):
         stats, report = converter.convert_episode(episode_dir, output_episode_index)
         episode_reports.append(report)
-        print(f"{episode_dir.name}: heads={stats.head_seen} written={stats.frames_written} drops={stats.as_dict()}")
+        print(
+            f"{episode_dir.name}: heads={stats.head_seen} written={stats.frames_written} drops={stats.as_dict()}"
+        )
         if stats.frames_written > 0:
             output_episode_index += 1
     writer.finalize()
     manifest = {
-        "schema": "franka_duo_tele_data.mcap_to_lerobot.v1",
+        "schema": "franka_duo_tele_data.mcap_to_lerobot.v2",
         "source_root": str(args.input_root.expanduser().resolve()),
         "output": str(args.output.expanduser().resolve()),
         "fps": args.fps,
@@ -1335,7 +1410,27 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
         "observation_ee_pose": "18D: left xyz+rot6d_rows followed by right xyz+rot6d_rows, relative to midpoint base",
         "pose_rotation_representation": "rot6d_rows: first two rows of each 3x3 rotation matrix flattened row-major",
         "pose_frame_assumption": "left/right current_pose payloads are respectively relative to their arm base links; static USD link0-to-midpoint transforms are applied",
-        "action": "18D next valid synchronized frame observation_ee_pose after 15Hz resampling; no gripper action is fabricated",
+        # Keep the human-readable legacy field and expose the machine-readable
+        # action contract separately for real-robot bundle exporters.
+        "action": (
+            "20D next valid synchronized frame target after 15Hz resampling: "
+            "left/right xyz+rot6d_rows followed by normalized left/right gripper "
+            "open fractions."
+        ),
+        "action_dim": ACTION_DIM,
+        "action_spec": {
+            "dimension": ACTION_DIM,
+            "ee_dimension": 9,
+            "ee_rotation": "rot6d_rows",
+            "layout": {
+                "left_ee": [0, 9],
+                "right_ee": [9, 18],
+                "left_gripper": 18,
+                "right_gripper": 19,
+            },
+            "ee_format": "xyz + continuous rot6d (first two rotation-matrix rows flattened row-major)",
+            "gripper_range": [0.0, 1.0],
+        },
         "sync": {
             "anchor": "ZED RGB header stamp",
             "zed_stream": "head RGB and registered depth are matched to the same ZED RGB anchor; output is fixed 15Hz by default",

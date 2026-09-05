@@ -21,10 +21,16 @@ topics:
   wrist_left_image: /wrist_camera_left/color/image_raw
   wrist_right_image: /wrist_camera_right/color/image_raw
 
-  # There is no verified aggregate TMR JointState topic. Pure image/point-cloud
-  # bundles do not subscribe to this key. A stateful bundle requires an on-site
-  # relay that publishes the recorder's 16D measured semantic contract here.
-  joint_states: /franka_duo/semantic_joint_states
+  # A stateful DP3 bundle consumes 34D = 14 measured joints + dual EE poses
+  # (18D XYZ+rot6d) + two normalized gripper openings.  The raw MCAP contract
+  # stores the measured joints and grippers as split relay topics.
+  joint_states: ""
+  left_joint_states: /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/measured_joint_states
+  right_joint_states: /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states
+  left_gripper_states: /franka_duo_tele_data/rate100/left/gripper/joint_states
+  right_gripper_states: /franka_duo_tele_data/rate100/right/gripper/joint_states
+  left_pose: /franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/current_pose
+  right_pose: /franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose
 
 cameras:
   head:
@@ -58,8 +64,8 @@ sync_history_size: 30
 
 # Required only for a stateful bundle, together with the semantic relay above.
 # Measure the real endpoints; never copy simulation calibration values.
-state_gripper_closed: null
-state_gripper_open: null
+state_gripper_closed: 0.8
+state_gripper_open: 0.0
 
 # Safety relay only. eval remains dry-run unless both --publish and
 # --enable-robot are supplied.
@@ -68,3 +74,17 @@ state_gripper_open: null
 publish_topic: /franka_duo/policy_action
 trace_topic: /franka_duo/eval/action_trace
 inference_timeout_ms: 100.0
+
+# Action-chunk control (recommended on the real Franka Duo Mobile).
+# control_mode: single  -> one 20D action per frame to publish_topic (legacy).
+# control_mode: chunk   -> the policy's whole chunk [horizon x 20] is
+#   published as one Float32MultiArray to chunk_topic; the site node
+#   `franka_duo_ptp_step/policy_chunk_jtc_stream` converts it via MoveIt KDL
+#   IK into a 50 Hz JointTrajectory anchored at the measured state and streams
+#   it through jtc_command_relay to the per-arm joint_trajectory_controller.
+#   The evaluator waits chunk_execute_steps / fps before the next observation,
+#   so the next chunk replaces the running trajectory before it finishes.
+control_mode: chunk
+chunk_topic: /franka_duo/policy_action_chunk
+chunk_execute_steps: 8
+chunk_inference_timeout_ms: 1000.0

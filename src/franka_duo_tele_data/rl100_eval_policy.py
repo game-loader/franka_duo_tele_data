@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from .action_spec import FrankaDuoActionSpec
+from .action_spec import ACTION_DIM, FrankaDuoActionSpec
 from .franka_duo_eval_io import PointCloudConfig
 
 LOGGER = logging.getLogger("franka_duo_eval.policy")
@@ -37,6 +37,8 @@ SUPPORTED_BACKENDS = {"lerobot", "rl100_native"}
 
 class _Predictor(Protocol):
     def predict(self, observation: dict[str, np.ndarray]) -> np.ndarray: ...
+
+    def predict_chunk(self, observation: dict[str, np.ndarray]) -> np.ndarray: ...
 
     def reset(self) -> None: ...
 
@@ -63,6 +65,37 @@ class PolicyBundle:
         if not np.isfinite(action).all():
             raise ValueError("Policy predictor returned non-finite action values")
         return np.ascontiguousarray(action)
+
+    def predict_chunk(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+        """Return the policy's full action chunk with shape ``[horizon, action_dim]``.
+
+        Action-chunking policies (DP3, Diffusion, ACT, ...) predict several
+        future actions per observation.  ``predict`` keeps only the first one;
+        this method exposes the whole chunk so the evaluator can stream it as
+        one continuous trajectory instead of re-planning every frame.
+        """
+        missing = [key for key in self.required_observation_keys if key not in observation]
+        if missing:
+            raise ValueError(f"Policy observation is missing required key(s): {missing}")
+        predict_chunk = getattr(self.predictor, "predict_chunk", None)
+        if callable(predict_chunk):
+            chunk = np.asarray(predict_chunk(observation), dtype=np.float32)
+        else:
+            chunk = np.asarray(self.predictor.predict(observation), dtype=np.float32).reshape(1, -1)
+        if chunk.ndim != 2 or chunk.shape[0] < 1 or chunk.shape[1] != self.action_spec.dimension:
+            raise ValueError(
+                "Policy predictor must return an action chunk with shape "
+                f"[horizon, {self.action_spec.dimension}], got {chunk.shape}"
+            )
+        if not np.isfinite(chunk).all():
+            raise ValueError("Policy predictor returned non-finite action chunk values")
+        return np.ascontiguousarray(chunk)
+
+    @property
+    def chunk_horizon(self) -> int | None:
+        """Number of actions the policy predicts per observation, when known."""
+        value = getattr(self.predictor, "chunk_horizon", None)
+        return int(value) if value is not None else None
 
     def reset(self) -> None:
         self.predictor.reset()
@@ -135,8 +168,8 @@ def _validate_inputs(
         action_dim = int(action_dim)
     except (TypeError, ValueError) as exc:
         raise ValueError("manifest action_dim must be an integer") from exc
-    if action_dim != 20:
-        raise ValueError("manifest action_dim must be exactly 20")
+    if action_dim != ACTION_DIM:
+        raise ValueError(f"manifest action_dim must be exactly {ACTION_DIM}")
     raw_pointcloud = manifest.get("pointcloud")
     if not isinstance(raw_pointcloud, Mapping):
         raise ValueError("manifest.pointcloud is required and must be a mapping")
@@ -155,7 +188,8 @@ def _validate_inputs(
     return dict(raw), bool(raw.get("state_key")), required_keys, image_model_keys
 
 
-def _as_action(value: Any) -> np.ndarray:
+def _as_action_chunk(value: Any) -> np.ndarray:
+    """Normalize a policy output to ``[horizon, action_dim]`` for batch size one."""
     try:
         import torch
 
@@ -164,10 +198,21 @@ def _as_action(value: Any) -> np.ndarray:
     except ImportError:
         pass
     array = np.asarray(value, dtype=np.float32)
-    if array.ndim > 1:
-        # A policy may return [batch, action_dim] or [batch, horizon, action_dim].
-        array = array.reshape(-1, array.shape[-1])[0]
-    return array.reshape(-1)
+    if array.ndim == 0:
+        raise ValueError("policy returned a scalar instead of an action")
+    if array.ndim == 1:
+        return array.reshape(1, -1)
+    if array.ndim == 3 and array.shape[0] != 1:
+        raise ValueError(f"policy returned a batch of {array.shape[0]} action chunks; expected 1")
+    # [batch=1, horizon, action_dim] -> [horizon, action_dim]; a [batch,
+    # action_dim] output (one action per row) is flattened to rows too.
+    return array.reshape(-1, array.shape[-1])
+
+
+def _as_action(value: Any) -> np.ndarray:
+    # A policy may return [batch, action_dim] or [batch, horizon, action_dim];
+    # the single-action contract keeps only the first row.
+    return _as_action_chunk(value)[0].reshape(-1)
 
 
 def _prepare_native_input(
@@ -210,6 +255,9 @@ class _LeRobotPredictor:
         self.device = device
         self.required_observation_keys = required_observation_keys
         self.prepare_observation = prepare_observation
+        config = getattr(policy, "config", None)
+        n_action_steps = getattr(config, "n_action_steps", None)
+        self.chunk_horizon = int(n_action_steps) if n_action_steps is not None else None
 
     def reset(self) -> None:
         self.policy.reset()
@@ -218,7 +266,7 @@ class _LeRobotPredictor:
             if callable(reset):
                 reset()
 
-    def predict(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+    def _preprocess(self, observation: dict[str, np.ndarray]) -> Any:
         import torch
 
         missing = [key for key in self.required_observation_keys if key not in observation]
@@ -232,11 +280,81 @@ class _LeRobotPredictor:
             {key: np.asarray(value).copy() for key, value in observation.items()},
             torch.device(self.device),
         )
-        batch = self.preprocessor(prepared)
+        return self.preprocessor(prepared)
+
+    def predict(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+        import torch
+
+        batch = self._preprocess(observation)
         with torch.inference_mode():
             action = self.policy.select_action(batch)
             action = self.postprocessor(action)
         return _as_action(action)
+
+    def predict_chunk(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+        """Run one forward pass and return every predicted action, unnormalized.
+
+        LeRobot's ``select_action`` caches ``n_action_steps`` actions in an
+        internal queue and pops one per call.  Chunk streaming bypasses that
+        queue: refresh the observation-history queues exactly as
+        ``select_action`` does, call ``predict_action_chunk`` once, and
+        post-process each step separately so the saved postprocessor sees the
+        same ``[1, action_dim]`` shape it was serialized for.
+        """
+        import torch
+
+        batch = self._preprocess(observation)
+        predict_action_chunk = getattr(self.policy, "predict_action_chunk", None)
+        queues = getattr(self.policy, "_queues", None)
+        if not callable(predict_action_chunk) or not isinstance(queues, dict):
+            # Policies without chunking expose one action per observation.
+            with torch.inference_mode():
+                action = self.postprocessor(self.policy.select_action(batch))
+            return _as_action_chunk(action)
+        from lerobot.policies.utils import populate_queues
+
+        conditioning = {key: value for key, value in batch.items() if key in queues and key != "action"}
+        if not conditioning:
+            raise ValueError("LeRobot policy exposes no observation queues to condition the action chunk")
+        with torch.inference_mode():
+            self.policy._queues = populate_queues(queues, conditioning)
+            chunk = predict_action_chunk(conditioning)
+            if chunk.ndim != 3 or chunk.shape[0] != 1:
+                raise ValueError(
+                    f"predict_action_chunk returned shape {tuple(chunk.shape)}, expected [1, horizon, dim]"
+                )
+            rows = [_as_action(self.postprocessor(chunk[:, index])) for index in range(chunk.shape[1])]
+        return np.stack(rows, axis=0).astype(np.float32)
+
+
+def _prepare_lerobot_observation(
+    observation: dict[str, np.ndarray],
+    device: Any,
+    *,
+    image_shapes: Mapping[str, tuple[int, int]],
+) -> dict[str, np.ndarray]:
+    """Resize live HWC images to the training feature resolution.
+
+    DP3 checkpoints trained on the Franka dataset use 256x256 wrist frames,
+    while the ROS cameras commonly publish 480x270.  The policy's processor
+    intentionally owns normalization, so this helper only performs the
+    deterministic spatial resize before handing arrays to LeRobot.
+    """
+
+    import torch
+    import torch.nn.functional as functional
+
+    result = {key: np.asarray(value) for key, value in observation.items()}
+    for key, (height, width) in image_shapes.items():
+        value = result.get(key)
+        if value is None or tuple(value.shape[:2]) == (height, width):
+            continue
+        if value.ndim != 3 or value.shape[2] != 3:
+            raise ValueError(f"Live image {key} must be HWC RGB, got {value.shape}")
+        tensor = torch.from_numpy(value).permute(2, 0, 1).unsqueeze(0).to(torch.float32)
+        tensor = functional.interpolate(tensor, size=(height, width), mode="bilinear", align_corners=False)
+        result[key] = tensor.squeeze(0).permute(1, 2, 0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+    return result
 
 
 def _load_lerobot(bundle_dir: Path, manifest: dict[str, Any], device: str) -> PolicyBundle:
@@ -261,14 +379,15 @@ def _load_lerobot(bundle_dir: Path, manifest: dict[str, Any], device: str) -> Po
     if not policy_dir.is_dir():
         raise FileNotFoundError(f"LeRobot policy directory does not exist: {policy_dir}")
     pointcloud = PointCloudConfig.from_manifest(manifest)
+    action_spec = FrankaDuoActionSpec.from_manifest(manifest)
     input_spec, requires_state, required_keys, _image_keys = _validate_inputs(manifest, pointcloud)
     config = PreTrainedConfig.from_pretrained(policy_dir)
     resolved_device = _resolve_device(device)
     config.device = resolved_device
     action_feature = config.action_feature
-    if action_feature is None or tuple(action_feature.shape) != (20,):
+    if action_feature is None or tuple(action_feature.shape) != (action_spec.dimension,):
         shape = None if action_feature is None else action_feature.shape
-        raise ValueError(f"LeRobot bundle action feature must be (20,), got {shape}")
+        raise ValueError(f"LeRobot bundle action feature must be ({action_spec.dimension},), got {shape}")
     input_features = config.input_features or {}
     point_key = str(input_spec["point_cloud_key"])
     point_feature = input_features.get(point_key)
@@ -285,10 +404,23 @@ def _load_lerobot(bundle_dir: Path, manifest: dict[str, Any], device: str) -> Po
         state_feature = input_features.get(str(input_spec["state_key"]))
         if state_feature is None:
             raise ValueError(f"LeRobot bundle is missing state feature {input_spec['state_key']}")
+    image_shapes = {
+        key: (int(feature.shape[1]), int(feature.shape[2]))
+        for key, feature in input_features.items()
+        if key in expected_image_keys and len(feature.shape) == 3
+    }
     policy_class = get_policy_class(config.type)
     policy = policy_class.from_pretrained(policy_dir, config=config, strict=True)
     try:
-        preprocessor, postprocessor = make_pre_post_processors(config, pretrained_path=str(policy_dir))
+        # Checkpoints persist the device processor (usually ``cuda`` from the
+        # training host).  Override it at load time so CPU smoke tests and
+        # ROCm hosts use the evaluator's resolved device rather than the
+        # serialized training device.
+        preprocessor, postprocessor = make_pre_post_processors(
+            config,
+            pretrained_path=str(policy_dir),
+            preprocessor_overrides={"device_processor": {"device": resolved_device}},
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise ValueError(
             f"LeRobot bundle must include saved policy_preprocessor.json and policy_postprocessor.json: {policy_dir}"
@@ -303,7 +435,14 @@ def _load_lerobot(bundle_dir: Path, manifest: dict[str, Any], device: str) -> Po
             postprocessor,
             resolved_device,
             required_observation_keys=required_keys,
-            prepare_observation=prepare_observation_for_inference,
+            prepare_observation=lambda observation, target_device: prepare_observation_for_inference(
+                _prepare_lerobot_observation(
+                    observation,
+                    target_device,
+                    image_shapes=image_shapes,
+                ),
+                target_device,
+            ),
         ),
         required_observation_keys=required_keys,
         requires_state=requires_state,
@@ -354,7 +493,7 @@ class _NativePredictor:
             batch[key] = torch.stack(history, dim=1)
         return batch
 
-    def predict(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+    def _raw_prediction(self, observation: dict[str, np.ndarray]) -> Any:
         batch = self._history_batch(observation)
         if callable(getattr(self.model, "predict", None)):
             value = self.model.predict(batch)
@@ -368,7 +507,15 @@ class _NativePredictor:
             value = value.get("action", value.get("actions"))
         if value is None:
             raise ValueError("native policy returned no action")
-        return _as_action(value)
+        return value
+
+    def predict(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+        return _as_action(self._raw_prediction(observation))
+
+    def predict_chunk(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+        # A native model returning [1, horizon, dim] or [horizon, dim] is a
+        # chunk; a single [dim] / [1, dim] output becomes a one-step chunk.
+        return _as_action_chunk(self._raw_prediction(observation))
 
 
 def _load_native(bundle_dir: Path, manifest: dict[str, Any], device: str) -> PolicyBundle:

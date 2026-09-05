@@ -3,19 +3,16 @@ import math
 import os
 from pathlib import Path
 
+from franka_mobile_fr3_duo_moveit_config.description import get_robot_descriptions
+from franka_mobile_fr3_duo_moveit_config.parameters import get_parameters
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from franka_mobile_fr3_duo_moveit_config.description import get_robot_descriptions
-from franka_mobile_fr3_duo_moveit_config.parameters import get_parameters
-
 
 def _load_action(context):
-    action_file = Path(
-        LaunchConfiguration("action_file").perform(context)
-    ).expanduser()
+    action_file = Path(LaunchConfiguration("action_file").perform(context)).expanduser()
     action_index = int(LaunchConfiguration("action_index").perform(context))
     action_start_index = int(LaunchConfiguration("action_start_index").perform(context))
     action_end_index = int(LaunchConfiguration("action_end_index").perform(context))
@@ -28,11 +25,7 @@ def _load_action(context):
         action_end_index = action_index + 1
     if action_end_index < 0:
         action_end_index = len(actions)
-    if (
-        action_start_index < 0
-        or action_end_index <= action_start_index
-        or action_end_index > len(actions)
-    ):
+    if action_start_index < 0 or action_end_index <= action_start_index or action_end_index > len(actions):
         raise RuntimeError(
             f"invalid action range [{action_start_index}, {action_end_index}) in {action_file}"
         )

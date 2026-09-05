@@ -16,6 +16,7 @@ find_package(moveit_ros_planning REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 
 add_executable(left_ptp_step
@@ -26,6 +27,9 @@ add_executable(duo_ptp_episode
 )
 add_executable(jtc_command_relay
   src/jtc_command_relay.cpp
+)
+add_executable(policy_chunk_jtc_stream
+  src/policy_chunk_jtc_stream.cpp
 )
 ament_target_dependencies(left_ptp_step
   franka_msgs
@@ -50,12 +54,22 @@ ament_target_dependencies(jtc_command_relay
   rclcpp
   trajectory_msgs
 )
+ament_target_dependencies(policy_chunk_jtc_stream
+  builtin_interfaces
+  moveit_core
+  moveit_ros_planning
+  rclcpp
+  sensor_msgs
+  std_msgs
+  trajectory_msgs
+)
 
 install(
   TARGETS
     left_ptp_step
     duo_ptp_episode
     jtc_command_relay
+    policy_chunk_jtc_stream
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 install(

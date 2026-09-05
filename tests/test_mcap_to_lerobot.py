@@ -52,12 +52,19 @@ def test_transform_composition_inverse_and_pose_vector() -> None:
 
 
 def test_adaptive_voxel_sample_returns_xyz_only_fixed_size() -> None:
-    grid = np.stack(np.meshgrid(
-        np.linspace(0.4, 1.2, 80),
-        np.linspace(-0.3, 0.3, 40),
-        np.linspace(-0.3, 0.3, 30),
-        indexing="ij",
-    ), axis=-1).reshape(-1, 3).astype(np.float32)
+    grid = (
+        np.stack(
+            np.meshgrid(
+                np.linspace(0.4, 1.2, 80),
+                np.linspace(-0.3, 0.3, 40),
+                np.linspace(-0.3, 0.3, 30),
+                indexing="ij",
+            ),
+            axis=-1,
+        )
+        .reshape(-1, 3)
+        .astype(np.float32)
+    )
     sampled = adaptive_voxel_sample(grid, 2048, seed=5)
     assert sampled.shape == (2048, 3)
     assert sampled.dtype == np.float32
@@ -130,13 +137,19 @@ def test_writer_emits_video_metadata_for_v3_reader(tmp_path) -> None:
         point_cloud=np.zeros((2, 3), dtype=np.float32),
         state=np.zeros(16, dtype=np.float32),
         ee_pose=pose,
+        gripper=np.zeros(2, dtype=np.float32),
     )
-    writer.add_frame(frame, pose, episode_index=0, frame_index=0)
+    action = np.concatenate((pose, np.zeros(2, dtype=np.float32)))
+    writer.add_frame(frame, action, episode_index=0, frame_index=0)
     writer.finish_episode(0, "episode_000000", SyncStats(frames_written=1))
     writer.finalize()
     info = json.loads((tmp_path / "meta" / "info.json").read_text(encoding="utf-8"))
     assert info["features"]["observation.ee_pose"]["shape"] == [18]
-    assert info["features"]["action"]["shape"] == [18]
+    assert info["features"]["action"]["shape"] == [20]
+    assert info["features"]["action"]["names"][-2:] == [
+        "left_gripper_open_fraction",
+        "right_gripper_open_fraction",
+    ]
     assert info["features"]["observation.point_cloud"]["names"] == ["x", "y", "z"]
     video_info = info["features"]["observation.images.head"]["info"]
     assert video_info["video.height"] == 4

@@ -15,7 +15,7 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
-from .action_spec import FrankaDuoActionSpec, action_spec_manifest
+from .action_spec import ACTION_DIM, FrankaDuoActionSpec, action_spec_manifest
 from .franka_duo_eval_io import PointCloudConfig
 
 
@@ -32,14 +32,28 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True, help="new self-contained bundle directory")
     parser.add_argument("--factory", required=True, help="python.module:function used by the native loader")
     parser.add_argument("--python-root", default=None, help="optional path inside the bundle for the factory")
-    parser.add_argument("--num-points", type=int, default=512)
+    parser.add_argument("--num-points", type=int, default=2048)
     parser.add_argument("--channels", type=int, choices=(3, 6), default=3)
-    parser.add_argument("--sampling", choices=("random", "fps"), default="fps")
+    # Keep exports aligned with the canonical Franka Duo mcap_to_lerobot
+    # converter (adaptive voxel representatives + deterministic thinning).
+    parser.add_argument("--sampling", choices=("adaptive", "fps"), default="adaptive")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workspace-min", type=_floats, default=None)
     parser.add_argument("--workspace-max", type=_floats, default=None)
     parser.add_argument("--extrinsics", type=_floats, default=None, help="camera-to-training-frame 4x4")
     parser.add_argument("--state-key", default=None, help="native state input key, e.g. agent_pos")
+    parser.add_argument(
+        "--left-link0-from-base",
+        type=_floats,
+        default=None,
+        help="row-major 4x4 transform converting left action base frame to link0",
+    )
+    parser.add_argument(
+        "--right-link0-from-base",
+        type=_floats,
+        default=None,
+        help="row-major 4x4 transform converting right action base frame to link0",
+    )
     parser.add_argument(
         "--image-keys",
         default='{"image":["wrist_left","wrist_right"]}',
@@ -53,6 +67,10 @@ def build_manifest(args: argparse.Namespace) -> dict:
     image_keys = json.loads(args.image_keys)
     if not isinstance(image_keys, dict):
         raise ValueError("--image-keys must be a JSON object")
+    if args.left_link0_from_base is not None and len(args.left_link0_from_base) != 16:
+        raise ValueError("--left-link0-from-base must contain sixteen values")
+    if args.right_link0_from_base is not None and len(args.right_link0_from_base) != 16:
+        raise ValueError("--right-link0-from-base must contain sixteen values")
     pointcloud = PointCloudConfig(
         num_points=args.num_points,
         channels=args.channels,
@@ -71,13 +89,20 @@ def build_manifest(args: argparse.Namespace) -> dict:
     manifest = {
         "manifest_version": 1,
         "backend": "rl100_native",
-        "action_dim": 20,
+        "action_dim": ACTION_DIM,
         "action_spec": action_spec_manifest(
             # Publish limits are intentionally absent unless the operator supplies them.
             # The eval CLI refuses --publish without explicit bounds.
             FrankaDuoActionSpec(
+                dimension=ACTION_DIM,
                 workspace_min=tuple(args.workspace_min) if args.workspace_min is not None else None,
                 workspace_max=tuple(args.workspace_max) if args.workspace_max is not None else None,
+                left_link0_from_base=(
+                    tuple(args.left_link0_from_base) if args.left_link0_from_base is not None else None
+                ),
+                right_link0_from_base=(
+                    tuple(args.right_link0_from_base) if args.right_link0_from_base is not None else None
+                ),
             )
         ),
         "pointcloud": {
@@ -100,6 +125,10 @@ def build_manifest(args: argparse.Namespace) -> dict:
             "checkpoint_dir": "checkpoint",
         },
     }
+    if args.extrinsics is None:
+        raise ValueError(
+            "RL-100 eval export requires --extrinsics from the training mcap_to_lerobot manifest."
+        )
     return manifest
 
 

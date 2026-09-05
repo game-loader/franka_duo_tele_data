@@ -1,10 +1,9 @@
+from franka_mobile_fr3_duo_moveit_config.description import get_robot_descriptions
+from franka_mobile_fr3_duo_moveit_config.parameters import get_parameters
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
-from franka_mobile_fr3_duo_moveit_config.description import get_robot_descriptions
-from franka_mobile_fr3_duo_moveit_config.parameters import get_parameters
 
 
 def generate_launch_description() -> LaunchDescription:

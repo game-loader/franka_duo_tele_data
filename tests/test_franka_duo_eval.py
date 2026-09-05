@@ -207,7 +207,14 @@ def _native_manifest() -> dict:
             "ee_rotation": "rot6d_rows",
             "gripper_range": [0.0, 1.0],
         },
-        "pointcloud": {"num_points": 8, "channels": 3, "sampling": "random"},
+        "pointcloud": {
+            "num_points": 8,
+            "channels": 3,
+            "sampling": "random",
+            # Test-only calibrated transform; production bundles must carry
+            # the mcap_to_lerobot ZED-to-base calibration.
+            "extrinsics": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        },
         "inputs": {
             "point_cloud_key": "point_cloud",
             "state_key": None,
@@ -330,6 +337,7 @@ def test_export_bundle_copies_native_weights_and_writes_manifest(tmp_path):
                 "factory_mod:make",
                 "--workspace-min=-1,-1,0",
                 "--workspace-max=1,1,1",
+                "--extrinsics=1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1",
             ]
         )
         == 0
@@ -596,7 +604,9 @@ def _eval_args(eval_config: Path, *, prompt_reward: bool = False) -> SimpleNames
     )
 
 
-def _install_fake_eval_runtime(monkeypatch, tmp_path: Path, *, reader_error=None):
+def _install_fake_eval_runtime(
+    monkeypatch, tmp_path: Path, *, reader_error=None, extra_config=None, bundle=None
+):
     raw_config = _write_eval_mcap_config(tmp_path, [*_default_eval_input_topics(), "/control/raw"])
     eval_config = tmp_path / "eval.yaml"
     eval_config.write_text(
@@ -604,6 +614,7 @@ def _install_fake_eval_runtime(monkeypatch, tmp_path: Path, *, reader_error=None
             {
                 "mcap": {"config": raw_config.name, "dataset_name": "eval_capture"},
                 "trace_topic": "/eval/action_trace",
+                **(extra_config or {}),
             }
         ),
         encoding="utf-8",
@@ -614,13 +625,26 @@ def _install_fake_eval_runtime(monkeypatch, tmp_path: Path, *, reader_error=None
         def __init__(self) -> None:
             self.data = ""
 
+    class MultiArrayDimension:
+        def __init__(self) -> None:
+            self.label = ""
+            self.size = 0
+            self.stride = 0
+
+    class Float32MultiArray:
+        def __init__(self) -> None:
+            self.layout = SimpleNamespace(dim=[], data_offset=0)
+            self.data = []
+
     fake_messages.String = String
+    fake_messages.MultiArrayDimension = MultiArrayDimension
+    fake_messages.Float32MultiArray = Float32MultiArray
     fake_std_msgs = ModuleType("std_msgs")
     fake_std_msgs.msg = fake_messages
     monkeypatch.setitem(sys.modules, "std_msgs", fake_std_msgs)
     monkeypatch.setitem(sys.modules, "std_msgs.msg", fake_messages)
 
-    bundle = _FakeEvalBundle()
+    bundle = bundle if bundle is not None else _FakeEvalBundle()
     node = _FakeNode()
     rclpy = _FakeRclpy()
     _FakeEvalMcapRecorder.instances = []
@@ -717,3 +741,132 @@ def test_publish_without_second_gate_fails_before_mcap_start(monkeypatch, tmp_pa
     with pytest.raises(ValueError, match="explicit second safety gate"):
         eval_franka_duo.run(args)
     assert _FakeEvalMcapRecorder.instances == []
+
+
+class _FakeChunkEvalBundle(_FakeEvalBundle):
+    def __init__(self, horizon: int = 4) -> None:
+        super().__init__()
+        self.horizon = horizon
+        self.predict_calls = 0
+        self.action_spec = SimpleNamespace(
+            workspace_min=(-1.0, -1.0, 0.0),
+            left_link0_from_base=tuple(np.eye(4, dtype=np.float32).reshape(-1).tolist()),
+            right_link0_from_base=tuple(np.eye(4, dtype=np.float32).reshape(-1).tolist()),
+            validate=lambda action: action,
+            to_link0_action=lambda action: np.asarray(action, dtype=np.float32) + 1.0,
+        )
+
+    def predict_chunk(self, _observation):
+        self.predict_calls += 1
+        chunk = np.zeros((self.horizon, 20), dtype=np.float32)
+        chunk[:, 0] = np.arange(self.horizon, dtype=np.float32)
+        return chunk
+
+
+def test_eval_chunk_mode_publishes_whole_chunk_and_traces_it(monkeypatch, tmp_path):
+    eval_config, bundle, node, _rclpy = _install_fake_eval_runtime(
+        monkeypatch,
+        tmp_path,
+        extra_config={
+            "control_mode": "chunk",
+            "chunk_topic": "/eval/policy_action_chunk",
+            "chunk_execute_steps": 2,
+            "chunk_inference_timeout_ms": 5000.0,
+        },
+        bundle=_FakeChunkEvalBundle(horizon=4),
+    )
+    args = _eval_args(eval_config)
+    args.publish = True
+    args.enable_robot = True
+
+    assert eval_franka_duo.run(args) == 0
+
+    assert bundle.predict_calls == 1
+    trace = json.loads(node.publishers["/eval/action_trace"].messages[0].data)
+    assert trace["schema"] == "franka_duo_eval_action_chunk_v1"
+    assert trace["horizon"] == 4
+    assert trace["execute_steps"] == 2
+    assert trace["action_frame"] == "link0"
+    assert trace["model_actions"][3][0] == 3.0
+    assert trace["actions"][3][0] == 4.0
+    relay = node.publishers["/eval/policy_action_chunk"].messages
+    assert len(relay) == 1
+    assert len(relay[0].data) == 4 * 20
+    assert [dim.size for dim in relay[0].layout.dim] == [4, 20]
+    assert relay[0].layout.data_offset == 2
+    assert relay[0].data[:20][0] == 1.0 and relay[0].data[60] == 4.0
+
+
+def test_eval_chunk_mode_rejects_bundle_without_predict_chunk(monkeypatch, tmp_path):
+    eval_config, _bundle, _node, _rclpy = _install_fake_eval_runtime(
+        monkeypatch, tmp_path, extra_config={"control_mode": "chunk"}
+    )
+    with pytest.raises(ValueError, match="predict_chunk"):
+        eval_franka_duo.run(_eval_args(eval_config))
+
+
+def test_eval_config_validates_chunk_settings(tmp_path):
+    path = tmp_path / "eval.yaml"
+    path.write_text(yaml.safe_dump({"control_mode": "servo"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="control_mode"):
+        load_eval_config(path)
+    path.write_text(
+        yaml.safe_dump({"control_mode": "chunk", "chunk_execute_steps": 0}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="chunk_execute_steps"):
+        load_eval_config(path)
+    path.write_text(yaml.safe_dump({"control_mode": "chunk", "chunk_topic": ""}), encoding="utf-8")
+    with pytest.raises(ValueError, match="chunk_topic"):
+        load_eval_config(path)
+
+
+def test_eval_rejects_trace_topic_equal_to_chunk_topic(monkeypatch, tmp_path):
+    eval_config, _bundle, _node, _rclpy = _install_fake_eval_runtime(
+        monkeypatch,
+        tmp_path,
+        extra_config={"control_mode": "chunk", "chunk_topic": "/eval/action_trace"},
+        bundle=_FakeChunkEvalBundle(),
+    )
+    with pytest.raises(ValueError, match="trace_topic must differ"):
+        eval_franka_duo.run(_eval_args(eval_config))
+
+
+def test_native_bundle_predict_chunk_keeps_horizon_and_predict_takes_first_row(tmp_path):
+    (tmp_path / "chunk_factory_mod.py").write_text(
+        """
+import numpy as np
+class Model:
+    def predict(self, batch):
+        chunk = np.zeros((1, 6, 20), dtype=np.float32)
+        chunk[0, :, 1] = np.arange(6)
+        return chunk
+def make(bundle_dir, device):
+    return Model()
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps({**_native_manifest(), "native": {"factory": "chunk_factory_mod:make", "python_root": "."}}), encoding="utf-8")
+    bundle = load_policy_bundle(tmp_path, device="cpu")
+    observation = {
+        "point_cloud": np.zeros((8, 3), dtype=np.float32),
+        "wrist_left": np.zeros((6, 16, 3), dtype=np.uint8),
+        "wrist_right": np.zeros((6, 16, 3), dtype=np.uint8),
+    }
+    chunk = bundle.predict_chunk(observation)
+    assert chunk.shape == (6, 20)
+    assert chunk[5, 1] == 5.0
+    assert bundle.predict(observation).shape == (20,)
+    assert bundle.predict(observation)[1] == 0.0
+
+
+def test_as_action_chunk_shapes():
+    from franka_duo_tele_data.rl100_eval_policy import _as_action, _as_action_chunk
+
+    assert _as_action_chunk(np.zeros(20)).shape == (1, 20)
+    assert _as_action_chunk(torch.zeros(1, 8, 20)).shape == (8, 20)
+    assert _as_action_chunk(np.zeros((8, 20))).shape == (8, 20)
+    assert _as_action(torch.zeros(1, 8, 20)).shape == (20,)
+    with pytest.raises(ValueError):
+        _as_action_chunk(np.zeros((2, 8, 20)))
+    with pytest.raises(ValueError):
+        _as_action_chunk(np.float32(1.0))

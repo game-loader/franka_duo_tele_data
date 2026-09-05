@@ -159,3 +159,42 @@ ros2 launch franka_duo_ptp_step duo_ptp_episode.launch.py \
 The stream node publishes only to `/franka_duo/eval/{left,right}/joint_trajectory`;
 the relay validates joint names, dimensions, timing, and finite values before
 forwarding to the controller command topics.
+
+## Live policy action-chunk executor
+
+`policy_chunk_jtc_stream` is the live counterpart of the offline `mode:=jtc`
+stream. It subscribes to the evaluator's `std_msgs/Float32MultiArray` action
+chunk (`/franka_duo/policy_action_chunk`, `layout.dim = [horizon, 20]`), solves
+`left_arm`/`right_arm` KDL IK row by row seeded from the measured joint state,
+resamples the joint path from `input_action_rate_hz` (must equal the evaluator
+`fps`) to `stream_rate_hz`, anchors it at the measured state and publishes one
+complete `JointTrajectory` per arm to `/franka_duo/eval/{left,right}/joint_trajectory`.
+Each new chunk replaces the running trajectory, so the arms keep moving as long
+as the evaluator publishes the next chunk before the previous one ends
+(`chunk_execute_steps < horizon` in `configs/tmr_eval.yaml`).
+
+Gates: nothing is published unless `execute:=true confirm:=true`; gripper
+targets (`/{left,right}/gripper/gripper_client/target_gripper_width_percent`)
+additionally require `enable_gripper:=true`; the relay still requires
+`enable_robot:=true`. A chunk is dropped when IK fails on its first row, when
+the joint-state feed is older than `joint_state_timeout_s`, when the implied
+joint velocity exceeds `max_joint_velocity_rad_s`, or when IK takes longer than
+`max_chunk_age_s`.
+
+Dry-run (IK and logging only), after both trajectory controllers are loaded:
+
+```bash
+ros2 launch franka_duo_ptp_step policy_chunk_jtc_stream.launch.py input_action_rate_hz:=15.0
+```
+
+Execute:
+
+```bash
+ros2 launch franka_duo_ptp_step jtc_command_relay.launch.py enable_robot:=true
+ros2 launch franka_duo_ptp_step policy_chunk_jtc_stream.launch.py \
+  execute:=true confirm:=true enable_gripper:=true
+```
+
+Then start the evaluator with `control_mode: chunk` and `--publish --enable-robot`.
+The full start order and the official `franka_mobile_fr3_duo_moveit_config`
+findings are in `docs/FRANKA_DUO_CHUNK_JTC.md`.

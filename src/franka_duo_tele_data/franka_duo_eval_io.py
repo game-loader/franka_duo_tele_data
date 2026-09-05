@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from .action_spec import matrix_to_rot6d
 from .pointcloud import adaptive_voxel_sample, depth_to_point_cloud, farthest_point_sample
 from .ros_utils import (
     _joint_map,
@@ -55,9 +56,12 @@ class EvalCameraConfig:
 
 @dataclasses.dataclass(frozen=True)
 class PointCloudConfig:
-    num_points: int = 512
+    num_points: int = 2048
     channels: int = 3
-    sampling: str = "random"
+    # Match the canonical Franka Duo conversion in ``mcap_to_lerobot.py``:
+    # adaptive voxel representatives followed by deterministic thinning to
+    # exactly 2048 XYZ points.
+    sampling: str = "adaptive"
     seed: int = 0
     min_depth: float = 0.05
     max_depth: float = 5.0
@@ -71,8 +75,12 @@ class PointCloudConfig:
             raise ValueError("pointcloud.num_points must be positive")
         if self.channels not in (3, 6):
             raise ValueError("pointcloud.channels must be 3 (XYZ) or 6 (XYZRGB)")
+        # ``adaptive`` is the production/training contract.  ``fps`` and
+        # ``random`` remain available for deterministic unit tests and
+        # explicitly declared legacy manifests; they are never selected by
+        # the current DP3 export defaults.
         if self.sampling not in {"adaptive", "random", "fps"}:
-            raise ValueError("pointcloud.sampling must be 'adaptive', 'random' or 'fps'")
+            raise ValueError("pointcloud.sampling must be 'adaptive', 'random', or 'fps'")
         if not 0 <= self.min_depth < self.max_depth:
             raise ValueError("pointcloud requires 0 <= min_depth < max_depth")
         if self.workspace_min is not None or self.workspace_max is not None:
@@ -112,14 +120,26 @@ class PointCloudConfig:
             return tuple(float(item) for item in value)  # type: ignore[return-value]
 
         extrinsics = raw.get("extrinsics")
+        if extrinsics is None:
+            geometry = manifest.get("coordinate_transforms")
+            if isinstance(geometry, Mapping):
+                extrinsics = geometry.get("T_newbase_from_zed_optical")
         if extrinsics is not None:
-            if not isinstance(extrinsics, Sequence) or len(extrinsics) != 16:
-                raise ValueError("manifest.pointcloud.extrinsics must contain 16 values")
-            extrinsics = tuple(float(item) for item in extrinsics)
+            matrix = np.asarray(extrinsics, dtype=np.float32)
+            if matrix.shape == (4, 4):
+                matrix = matrix.reshape(-1)
+            if matrix.shape != (16,) or not np.isfinite(matrix).all():
+                raise ValueError("manifest.pointcloud.extrinsics must contain a finite 4x4 matrix")
+            extrinsics = tuple(float(item) for item in matrix)
+        else:
+            raise ValueError(
+                "manifest must provide the training mcap_to_lerobot ZED-to-base extrinsics "
+                "(pointcloud.extrinsics or coordinate_transforms.T_newbase_from_zed_optical)"
+            )
         return cls(
-            num_points=int(raw.get("num_points", 512)),
+            num_points=int(raw.get("num_points", 2048)),
             channels=int(raw.get("channels", 3)),
-            sampling=str(raw.get("sampling", "random")),
+            sampling=str(raw.get("sampling", "adaptive")),
             seed=int(raw.get("seed", 0)),
             min_depth=float(raw.get("min_depth", 0.05)),
             max_depth=float(raw.get("max_depth", 5.0)),
@@ -163,6 +183,12 @@ class EvalObservationCache:
         self.depth = deque(maxlen=history_size * 2)
         self.camera_info: TimedValue | None = None
         self.joint_states = deque(maxlen=history_size)
+        self.left_joint_states = deque(maxlen=history_size)
+        self.right_joint_states = deque(maxlen=history_size)
+        self.left_gripper_states = deque(maxlen=history_size)
+        self.right_gripper_states = deque(maxlen=history_size)
+        self.left_pose = deque(maxlen=history_size)
+        self.right_pose = deque(maxlen=history_size)
 
     def _store(self, target: deque[TimedValue], message: Any) -> None:
         with self._condition:
@@ -181,6 +207,24 @@ class EvalObservationCache:
     def store_joint_states(self, message: Any) -> None:
         self._store(self.joint_states, message)
 
+    def store_left_joint_states(self, message: Any) -> None:
+        self._store(self.left_joint_states, message)
+
+    def store_right_joint_states(self, message: Any) -> None:
+        self._store(self.right_joint_states, message)
+
+    def store_left_gripper_states(self, message: Any) -> None:
+        self._store(self.left_gripper_states, message)
+
+    def store_right_gripper_states(self, message: Any) -> None:
+        self._store(self.right_gripper_states, message)
+
+    def store_left_pose(self, message: Any) -> None:
+        self._store(self.left_pose, message)
+
+    def store_right_pose(self, message: Any) -> None:
+        self._store(self.right_pose, message)
+
     def store_camera_info(self, message: Any) -> None:
         with self._condition:
             self.camera_info = TimedValue(message, time.monotonic_ns(), _stamp_ns(message))
@@ -194,6 +238,12 @@ class EvalObservationCache:
                 "images": {key: tuple(items) for key, items in self.images.items()},
                 "depth": tuple(self.depth),
                 "joint_states": tuple(self.joint_states),
+                "left_joint_states": tuple(self.left_joint_states),
+                "right_joint_states": tuple(self.right_joint_states),
+                "left_gripper_states": tuple(self.left_gripper_states),
+                "right_gripper_states": tuple(self.right_gripper_states),
+                "left_pose": tuple(self.left_pose),
+                "right_pose": tuple(self.right_pose),
                 "camera_info": self.camera_info,
             }
 
@@ -234,6 +284,42 @@ def _nearest(values: Sequence[TimedValue], target_ns: int, tolerance_ns: int) ->
     return best
 
 
+def _pose_to_transform(message: Any) -> np.ndarray:
+    """Decode geometry_msgs/PoseStamped into a homogeneous link0->EE transform."""
+
+    pose = getattr(message, "pose", message)
+    position = getattr(pose, "position", None)
+    orientation = getattr(pose, "orientation", None)
+    if position is None or orientation is None:
+        raise ValueError("pose message must expose position and orientation")
+    x, y, z = (float(getattr(position, name)) for name in ("x", "y", "z"))
+    qx, qy, qz, qw = (float(getattr(orientation, name)) for name in ("x", "y", "z", "w"))
+    norm = float(np.linalg.norm((qx, qy, qz, qw)))
+    if not np.isfinite(norm) or norm < 1e-8:
+        raise ValueError("pose quaternion is degenerate")
+    qx, qy, qz, qw = (value / norm for value in (qx, qy, qz, qw))
+    rotation = np.asarray(
+        [
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ],
+        dtype=np.float32,
+    )
+    transform = np.eye(4, dtype=np.float32)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = (x, y, z)
+    return transform
+
+
+def _pose_vector_in_base(message: Any, base_from_link0: np.ndarray | None) -> np.ndarray:
+    """Return one EE pose as ``xyz + first-two-rotation-matrix rows`` (9D)."""
+    transform = _pose_to_transform(message)
+    if base_from_link0 is not None:
+        transform = np.asarray(base_from_link0, dtype=np.float32).reshape(4, 4) @ transform
+    return np.concatenate((transform[:3, 3], matrix_to_rot6d(transform[:3, :3]))).astype(np.float32)
+
+
 def make_point_cloud(
     depth_m: np.ndarray,
     head_rgb: np.ndarray,
@@ -268,20 +354,6 @@ def make_point_cloud(
     )
     color = rgb if config.channels == 6 else None
     seed = int(config.seed) + int(frame_index)
-    if config.sampling == "random":
-        return depth_to_point_cloud(
-            depth,
-            info_k,
-            depth_scale=1.0,
-            rgb=color,
-            extrinsics=extrinsics,
-            workspace_min=config.workspace_min,
-            workspace_max=config.workspace_max,
-            min_depth=config.min_depth,
-            max_depth=config.max_depth,
-            num_points=config.num_points,
-            seed=seed,
-        )
     all_points = depth_to_point_cloud(
         depth,
         info_k,
@@ -296,7 +368,9 @@ def make_point_cloud(
     )
     if config.sampling == "adaptive":
         return adaptive_voxel_sample(all_points, config.num_points, seed=seed)
-    return farthest_point_sample(all_points, config.num_points, seed=seed, candidate_limit=config.fps_candidate_limit)
+    return farthest_point_sample(
+        all_points, config.num_points, seed=seed, candidate_limit=config.fps_candidate_limit
+    )
 
 
 class SynchronizedObservationReader:
@@ -315,6 +389,8 @@ class SynchronizedObservationReader:
         sync_wait_timeout_ms: float = 75.0,
         state_gripper_closed: float | None = None,
         state_gripper_open: float | None = None,
+        base_from_left_link0: Sequence[float] | np.ndarray | None = None,
+        base_from_right_link0: Sequence[float] | np.ndarray | None = None,
     ):
         required = {"head", "wrist_left", "wrist_right"}
         if set(cameras) != required:
@@ -329,6 +405,16 @@ class SynchronizedObservationReader:
         self.sync_wait_timeout_s = float(sync_wait_timeout_ms) / 1000.0
         self.state_gripper_closed = state_gripper_closed
         self.state_gripper_open = state_gripper_open
+        self.base_from_left_link0 = (
+            None
+            if base_from_left_link0 is None
+            else np.asarray(base_from_left_link0, dtype=np.float32).reshape(4, 4)
+        )
+        self.base_from_right_link0 = (
+            None
+            if base_from_right_link0 is None
+            else np.asarray(base_from_right_link0, dtype=np.float32).reshape(4, 4)
+        )
         self._last_head_stamp = -1
         self._frame_index = 0
 
@@ -360,10 +446,40 @@ class SynchronizedObservationReader:
                     last_error = "ZED CameraInfo has not arrived"
                 else:
                     state = _nearest(snapshot["joint_states"], target_ns, self.state_tolerance_ns)
-                    if state is not None:
+                    left_joint = _nearest(snapshot["left_joint_states"], target_ns, self.state_tolerance_ns)
+                    right_joint = _nearest(snapshot["right_joint_states"], target_ns, self.state_tolerance_ns)
+                    left_gripper = _nearest(
+                        snapshot["left_gripper_states"], target_ns, self.state_tolerance_ns
+                    )
+                    right_gripper = _nearest(
+                        snapshot["right_gripper_states"], target_ns, self.state_tolerance_ns
+                    )
+                    left_pose = _nearest(snapshot["left_pose"], target_ns, self.state_tolerance_ns)
+                    right_pose = _nearest(snapshot["right_pose"], target_ns, self.state_tolerance_ns)
+                    if state is not None and left_pose is not None and right_pose is not None:
                         selected["state"] = state
-                    if require_state and state is None:
-                        last_error = "state timestamp skew exceeds configured tolerance"
+                        selected["left_pose"] = left_pose
+                        selected["right_pose"] = right_pose
+                    split_state = (left_joint, right_joint, left_gripper, right_gripper)
+                    if (
+                        all(value is not None for value in split_state)
+                        and left_pose is not None
+                        and right_pose is not None
+                    ):
+                        selected["left_joint"] = left_joint  # type: ignore[assignment]
+                        selected["right_joint"] = right_joint  # type: ignore[assignment]
+                        selected["left_gripper"] = left_gripper  # type: ignore[assignment]
+                        selected["right_gripper"] = right_gripper  # type: ignore[assignment]
+                        selected["left_pose"] = left_pose
+                        selected["right_pose"] = right_pose
+                    split_ready = all(
+                        key in selected
+                        for key in ("left_joint", "right_joint", "left_gripper", "right_gripper")
+                    )
+                    if require_state and (
+                        (state is None and not split_ready) or left_pose is None or right_pose is None
+                    ):
+                        last_error = "state/pose timestamp skew exceeds configured tolerance"
                     else:
                         return selected
             self.cache.wait_for_update(int(snapshot["revision"]), max(0.0, deadline - time.monotonic()))
@@ -375,7 +491,7 @@ class SynchronizedObservationReader:
             raise TimeoutError("timed out waiting for a new stamped ZED RGB frame")
         target_ns = int(head.stamp_ns)
         selected = self._select(target_ns, require_state=require_state)
-        if require_state and "state" not in selected:
+        if require_state and not ("state" in selected or "left_joint" in selected):
             raise TimeoutError("model requires observation state, but no synchronized JointState arrived")
         images = {
             key: image_msg_to_rgb(
@@ -384,7 +500,14 @@ class SynchronizedObservationReader:
             )
             for key in ("head", "wrist_left", "wrist_right")
         }
-        depth = depth_msg_to_meters(selected["depth"].message, self.cameras["head"].depth_scale)
+        # Keep the ZED depth payload in float32 through deprojection.  The
+        # dataset converter uses float32 as well; float16 here would subtly
+        # change XYZ coordinates before the adaptive sampler.
+        depth = depth_msg_to_meters(
+            selected["depth"].message,
+            self.cameras["head"].depth_scale,
+            dtype=np.float32,
+        )
         if depth.shape != (self.cameras["head"].height, self.cameras["head"].width):
             raise ValueError(f"ZED depth shape {depth.shape} does not match configured RGB dimensions")
         camera_info = self.cache.snapshot()["camera_info"]
@@ -397,14 +520,44 @@ class SynchronizedObservationReader:
             frame_index=self._frame_index,
         )
         state = None
-        if "state" in selected:
+        if "state" in selected or "left_joint" in selected:
             if self.state_gripper_closed is None or self.state_gripper_open is None:
                 raise ValueError("state gripper calibration is required when a model consumes JointState")
-            state = build_state(
-                _joint_map(selected["state"].message),
-                closed_rad=self.state_gripper_closed,
-                open_rad=self.state_gripper_open,
+            if "state" in selected:
+                basic_state = build_state(
+                    _joint_map(selected["state"].message),
+                    closed_rad=self.state_gripper_closed,
+                    open_rad=self.state_gripper_open,
+                    include_spine=False,
+                )
+            else:
+                # TMR MCAP stores left/right measured joints and grippers as
+                # separate JointState topics.  Prefix names before passing
+                # through the shared semantic-state builder.
+                merged: dict[str, float] = {}
+                for side, key in (("left", "left_joint"), ("right", "right_joint")):
+                    for name, value in _joint_map(selected[key].message).items():
+                        merged[f"{side}_{name}"] = value
+                for side, key in (("left", "left_gripper"), ("right", "right_gripper")):
+                    for name, value in _joint_map(selected[key].message).items():
+                        merged[f"{side}_{name}"] = value
+                basic_state = build_state(
+                    merged,
+                    closed_rad=self.state_gripper_closed,
+                    open_rad=self.state_gripper_open,
+                    include_spine=False,
+                )
+            left_pose = _pose_vector_in_base(selected["left_pose"].message, self.base_from_left_link0)
+            right_pose = _pose_vector_in_base(selected["right_pose"].message, self.base_from_right_link0)
+            # DP3's training contract (see dataset meta/info.json) is:
+            # 14 arm joints, 2 normalized gripper openings, then the 18D
+            # dual-arm EE pose (XYZ + continuous 6D rotation rows).  Keep
+            # this order byte-for-byte aligned with the checkpoint input.
+            state = np.concatenate((basic_state[:14], basic_state[14:16], left_pose, right_pose)).astype(
+                np.float32
             )
+            if state.shape != (34,) or not np.isfinite(state).all():
+                raise ValueError(f"constructed DP3 state must be finite shape (34,), got {state.shape}")
         self._last_head_stamp = target_ns
         self._frame_index += 1
         source_stamps = {

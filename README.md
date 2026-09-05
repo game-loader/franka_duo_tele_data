@@ -5,7 +5,7 @@
 1. 将 4 路双臂流和 2 路夹爪状态流限频到最高 100 Hz，其余相机/TF topic 由 ROS 2 rosbag2
    逐 episode 直接写入 MCAP；
 2. 在离线机器上做时间同步、版本化 action/state 构造、LeRobot v3 转换和 FK；
-3. 在真机上加载已导出的 IL / offline RL bundle，推理 20D Cartesian action，同时保存
+3. 在真机上加载已导出的 IL / offline RL bundle，推理当前 DP3 的 20D Cartesian action，同时保存
    eval 的原始 MCAP 证据。
 
 本仓库不包含训练、仿真、Docker、底层 Franka 控制器、IK/轨迹执行器或 ARA。ROS 2、
@@ -436,10 +436,10 @@ horizon 和归一化，再写入派生数据 manifest。
 状态，则应另行用真实 URDF 做 FK。除非整条相机外参链已校准并验证，否则不能把 nominal
 转换结果称为精确 world pose。
 
-## 模型 Bundle 与 20D Action
+## 模型 Bundle 与 DP3 Action
 
 Eval 在线读取 ZED RGB/depth 生成 manifest 规定的 XYZ 或 XYZRGB 点云，并读取双 D405
-RGB。点数、3/6 通道、空间裁剪、外参、random/FPS 采样必须与训练 bundle 一致。模型输出：
+RGB。点数、3/6 通道、空间裁剪、外参、adaptive/FPS 采样必须与训练 bundle 一致。模型输出：
 
 ```text
 [0:9]    left EE:  xyz + rotation matrix first two rows (rot6d_rows)
@@ -458,7 +458,7 @@ uv run --extra eval franka-duo-export-bundle \
   --checkpoint /path/to/rl100/checkpoint \
   --output /path/to/franka_eval_bundle \
   --factory my_policy.factory:load --python-root policy_code \
-  --num-points 512 --channels 3 --sampling fps \
+  --num-points 2048 --channels 3 --sampling adaptive \
   --workspace-min=-0.8,-0.8,0.0 \
   --workspace-max=0.8,0.8,1.5
 ```
@@ -515,6 +515,15 @@ FRANKA_LEROBOT_POLICY=1 \
 `FRANKA_MCAP_CONFIG` 替换 MCAP/arm relay 配置。既不提供 reward 参数时，正常 episode 保存
 `reward: null`，不会等待终端输入。
 
+需要人工控制 episode 边界时可使用：
+
+```bash
+./scripts/run_eval.sh /path/to/franka_eval_bundle --manual-episode --prompt-reward
+```
+
+此模式下按 `r` 开始一集，`e`/`s` 停止并保存（随后按提示输入 reward），`d` 丢弃当前
+episode，`q` 退出。MCAP 仍由 rosbag2 以原始 topic 录制，模型动作 trace 继续写入同一 bag。
+
 `--once` 或达到 `--max-steps` 才是正常完成并标记 complete。推理/ROS 异常和 Ctrl-C 会
 保留 bag 但标记 incomplete；因此正式定长评测应设置 `--max-steps`，不要依靠 Ctrl-C 作为
 成功 episode 终点。
@@ -532,15 +541,29 @@ FRANKA_LEROBOT_POLICY=1 \
 `std_msgs/Float32MultiArray.data[20]`，不是 Franka controller 原生命令。本仓库不实现
 安全 relay，不能改 topic 绕过它。eval trace topic 必须与 command topic 不同。
 
+### Action chunk 连续控制（真机推荐）
+
+`configs/tmr_eval.yaml` 现在默认 `control_mode: chunk`：评测器通过
+`PolicyBundle.predict_chunk` 取出模型完整的 action chunk（`[horizon x 20]`，不再只取
+第一行），逐行做 validate 与 link0 变换，写入 `franka_duo_eval_action_chunk_v1` trace，并在
+`--publish --enable-robot` 时把整个 chunk 作为一条 `Float32MultiArray`
+（`layout.dim=[horizon,20]`）发到 `/franka_duo/policy_action_chunk`，随后等待
+`chunk_execute_steps / fps` 再取下一帧观测。`control_mode: single` 保留旧的逐帧行为。
+
+真机侧由 `site/franka_duo_ptp_step` 的 `policy_chunk_jtc_stream` 接收 chunk，用官方
+`franka_mobile_fr3_duo_moveit_config` 的 MoveIt KDL 做 IK，重采样为 50 Hz
+`JointTrajectory` 并经 `jtc_command_relay` 送入每臂 `joint_trajectory_controller`；
+新 chunk 替换正在执行的轨迹，避免 PTP 的走停不连续。启动顺序、参数和官方栈核对结论见
+`docs/FRANKA_DUO_CHUNK_JTC.md`。
+
 ### Stateful eval 限制
 
-当前 eval reader 只接受聚合的 `/franka_duo/semantic_joint_states`，本仓库尚未提供该
-publisher。因此纯点云 + 双腕 RGB bundle 可直接 eval；声明 `state_key` 的 bundle 必须
-先由现场 relay 发布与训练一致的 16D state，并填写夹爪标定。raw MCAP 虽保存了分流 topic，
-不会在 eval 进程内自动聚合 state。启用该 relay 后，还必须把
-`/franka_duo/semantic_joint_states` 加入 eval 使用的 MCAP topic 配置，否则 provenance
-preflight 会拒绝启动。现有 14D state-only 或输出非 20D 的 checkpoint 不能直接控制
-Franka Duo。
+声明 `state_key` 的 DP3 bundle 会读取 `/franka_duo/semantic_joint_states` 以及左右
+`current_pose`，在 eval 进程内构造与训练一致的 34D state（14D measured joints + 2D
+gripper opening + 18D dual-EE pose）；其中 18D pose 为每臂 XYZ 加旋转矩阵前两行展平的
+连续 6D 表示。请填写夹爪标定，并在 MCAP topic 配置中保留上述三条
+输入 topic。纯点云 + 双腕 RGB bundle 可不提供 state。raw MCAP 仍保持原始 topic，不会写入
+额外聚合字段。
 
 ## 开发验证
 

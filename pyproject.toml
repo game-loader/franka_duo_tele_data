@@ -31,6 +31,7 @@ franka-duo-arm-rate-relay = "franka_duo_tele_data.arm_rate_relay:main"
 franka-duo-mcap-record = "franka_duo_tele_data.mcap_recorder:main"
 franka-duo-eval = "franka_duo_tele_data.eval_franka_duo:main"
 franka-duo-export-bundle = "franka_duo_tele_data.export_rl100_eval_bundle:main"
+franka-duo-export-lerobot-bundle = "franka_duo_tele_data.export_lerobot_eval_bundle:main"
 franka-duo-mcap-to-lerobot = "franka_duo_tele_data.mcap_to_lerobot:main"
 
 [project.optional-dependencies]
