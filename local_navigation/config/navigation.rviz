@@ -1,0 +1,68 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Frame Timeout: 15
+      Marker Scale: 0.5
+      Show Axes: true
+      Show Names: true
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Map
+      Topic: /map
+      Alpha: 0.8
+      Color Scheme: map
+      Draw Behind: false
+      Use Timestamp: false
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Queue Size: 1
+    - Class: rviz_default_plugins/LaserScan
+      Enabled: false
+      Name: Dual LiDAR
+      Topic: /navigation/scan
+      Size (m): 0.03
+      Style: Points
+      Color: 255; 30; 30
+      Alpha: 1
+      Decay Time: 0
+    - Class: rviz_default_plugins/Polygon
+      Enabled: true
+      Name: Robot Footprint
+      Topic: /local_costmap/published_footprint
+      Color: 25; 255; 0
+      Line Style: Lines
+      Line Width: 0.03
+      Fill Color: 25; 255; 0
+      Fill Opacity: 0.12
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetInitialPose
+    - Class: rviz_default_plugins/SetGoal
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Angle: 0
+      Scale: 25
+      X: -0.25
+      Y: 0.0
+Window Geometry:
+  Height: 900
+  Width: 1400

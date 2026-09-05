@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>tmr_local_navigation</name>
+  <version>0.1.0</version>
+  <description>Local-only frame adapters for TMR LiDAR and odometry navigation.</description>
+  <maintainer email="benchmark@example.invalid">EBiM Benchmark Contributors</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+</package>

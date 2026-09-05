@@ -1,0 +1,7 @@
+image: moving_map_20260828_134741.pgm
+mode: trinary
+resolution: 0.05
+origin: [-8.78, -6.24, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
