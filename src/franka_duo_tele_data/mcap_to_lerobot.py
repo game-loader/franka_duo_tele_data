@@ -3,9 +3,8 @@
 
 The recorder deliberately keeps ROS messages raw.  This module is the offline
 boundary where those messages are decoded, synchronized and expressed in one
-dataset frame.  The implementation follows the RGB/depth -> XYZ -> rigid
-transform -> spatial sampling pipeline used by the RL-100/DP3 input path,
-while keeping the coordinate math explicit and auditable in this file.
+dataset frame.  The training output is RGB-only: depth remains in the raw bag
+but is not decoded into a point cloud or written as a model feature.
 
 The converter intentionally does not use ROS.  ``rosbags`` supplies the ROS 2
 CDR type system and ``AnyReader`` streams MCAP records without materialising a
@@ -29,14 +28,10 @@ from typing import Any
 import numpy as np
 
 from .action_spec import matrix_to_rot6d
-from .pointcloud import adaptive_voxel_sample, depth_to_point_cloud, farthest_point_sample
-from .ros_utils import depth_msg_to_meters, gripper_open_fraction, image_msg_to_rgb
+from .ros_utils import gripper_open_fraction, image_msg_to_rgb
 
 # The raw TMR topic names are part of the capture contract.  Keeping them in
 # one immutable mapping makes accidental source/relay substitutions visible.
-DEFAULT_WORKSPACE_MIN = (0.4, -0.3, -0.3)
-DEFAULT_WORKSPACE_MAX = (1.2, 0.3, 0.3)
-WRIST_IMAGE_SIZE = (256, 256)
 # The dual-arm Cartesian target has nine values per arm (XYZ + continuous
 # rotation-6D).  The two gripper values are appended in the same order as the
 # state fields and are taken from the *next* synchronized frame, exactly like
@@ -45,14 +40,10 @@ EE_ACTION_DIM = 18
 ACTION_DIM = 20
 DEFAULT_TOPICS = {
     "head_rgb": "/head_camera/zed/rgb/color/rect/image",
-    "head_depth": "/head_camera/zed/depth/depth_registered",
-    "head_info": "/head_camera/zed/rgb/color/rect/camera_info",
     "wrist_left_rgb": "/wrist_camera_left/color/image_raw",
     "wrist_right_rgb": "/wrist_camera_right/color/image_raw",
     "left_pose": "/franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/current_pose",
     "right_pose": "/franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/current_pose",
-    "left_joints": "/franka_duo_tele_data/rate100/left/franka_robot_state_broadcaster/measured_joint_states",
-    "right_joints": "/franka_duo_tele_data/rate100/right/franka_robot_state_broadcaster/measured_joint_states",
     "left_gripper": "/franka_duo_tele_data/rate100/left/gripper/joint_states",
     "right_gripper": "/franka_duo_tele_data/rate100/right/gripper/joint_states",
     "episode_event": "/franka_duo_tele_data/episode_event",
@@ -60,14 +51,10 @@ DEFAULT_TOPICS = {
 
 EXPECTED_TYPES = {
     "head_rgb": "sensor_msgs/msg/Image",
-    "head_depth": "sensor_msgs/msg/Image",
-    "head_info": "sensor_msgs/msg/CameraInfo",
     "wrist_left_rgb": "sensor_msgs/msg/Image",
     "wrist_right_rgb": "sensor_msgs/msg/Image",
     "left_pose": "geometry_msgs/msg/PoseStamped",
     "right_pose": "geometry_msgs/msg/PoseStamped",
-    "left_joints": "sensor_msgs/msg/JointState",
-    "right_joints": "sensor_msgs/msg/JointState",
     "left_gripper": "sensor_msgs/msg/JointState",
     "right_gripper": "sensor_msgs/msg/JointState",
     "episode_event": "std_msgs/msg/String",
@@ -189,12 +176,14 @@ def pose_vector(transform: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.concatenate((value[:3, 3], matrix_to_rot6d(value[:3, :3]))))
 
 
-def resize_rgb(image: np.ndarray, size: tuple[int, int] = WRIST_IMAGE_SIZE) -> np.ndarray:
-    """Resize an RGB HWC image without adding an image-processing dependency."""
+def resize_rgb(image: np.ndarray, size: tuple[int, int] | None = None) -> np.ndarray:
+    """Optionally resize an RGB HWC image; conversion keeps raw dimensions by default."""
 
     value = np.asarray(image, dtype=np.uint8)
     if value.ndim != 3 or value.shape[2] != 3:
         raise ValueError(f"image must have shape (H, W, 3), got {value.shape}")
+    if size is None:
+        return np.ascontiguousarray(value)
     height, width = (int(size[0]), int(size[1]))
     if height <= 0 or width <= 0:
         raise ValueError("resize target dimensions must be positive")
@@ -361,6 +350,47 @@ def load_usd_geometry(
     )
 
 
+def load_geometry_manifest(path: Path) -> UsdGeometry:
+    """Load the previously validated arm-to-midpoint transforms from JSON."""
+
+    try:
+        document = json.loads(path.expanduser().read_text(encoding="utf-8"))
+        values = document["coordinate_transforms"]
+        matrices = {
+            name: np.asarray(values[name], dtype=np.float32)
+            for name in (
+                "left_arm_world",
+                "right_arm_world",
+                "zed_mount_world",
+                "new_base_world",
+                "T_newbase_from_left_arm_base",
+                "T_newbase_from_right_arm_base",
+                "T_newbase_from_zed_optical",
+                "mount_to_optical",
+            )
+        }
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid geometry manifest {path}: {exc}") from exc
+    for name, matrix in matrices.items():
+        if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+            raise ValueError(f"geometry manifest matrix {name} must be a finite 4x4 matrix")
+    return UsdGeometry(
+        usd_path=str(values.get("usd_path", "")),
+        root_path=str(values.get("usd_root", "")),
+        left_arm_world=matrices["left_arm_world"],
+        right_arm_world=matrices["right_arm_world"],
+        zed_mount_world=matrices["zed_mount_world"],
+        new_base_world=matrices["new_base_world"],
+        base_from_left_arm=matrices["T_newbase_from_left_arm_base"],
+        base_from_right_arm=matrices["T_newbase_from_right_arm_base"],
+        base_from_zed_optical=matrices["T_newbase_from_zed_optical"],
+        left_prim=str(values.get("left_arm_prim", "")),
+        right_prim=str(values.get("right_arm_prim", "")),
+        mount_prim=str(values.get("zed_mount_prim", "")),
+        mount_to_optical=matrices["mount_to_optical"],
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class TimedMessage:
     stamp_ns: int
@@ -422,11 +452,9 @@ class SyncStats:
     head_seen: int = 0
     frames_ready: int = 0
     frames_written: int = 0
-    dropped_missing_depth: int = 0
     dropped_missing_wrist: int = 0
     dropped_missing_state: int = 0
     dropped_missing_pose: int = 0
-    dropped_missing_camera_info: int = 0
     dropped_invalid_payload: int = 0
     dropped_resampled: int = 0
     dropped_no_next_action: int = 0
@@ -443,12 +471,11 @@ class DerivedFrame:
     head_rgb: np.ndarray
     wrist_left_rgb: np.ndarray
     wrist_right_rgb: np.ndarray
-    point_cloud: np.ndarray
     state: np.ndarray
     ee_pose: np.ndarray
     left_pose_frame_id: str | None = None
     right_pose_frame_id: str | None = None
-    # Normalized open fractions for the two grippers.  This is kept separately
+    # Binary open/closed states for the two grippers.  This is kept separately
     # from ``state`` so action construction cannot accidentally use stale
     # state values when the representation evolves.
     gripper: np.ndarray | None = None
@@ -488,6 +515,23 @@ def _gripper_position(message: Any) -> float:
     if values.size == 0 or not np.isfinite(values[0]):
         raise ValueError("gripper JointState contains no finite position")
     return float(values[0])
+
+
+def _binary_gripper_state(
+    position: float,
+    *,
+    closed_position: float,
+    open_position: float,
+    threshold: float,
+) -> np.float32:
+    fraction = gripper_open_fraction(
+        position,
+        closed_position=closed_position,
+        open_position=open_position,
+    )
+    if not math.isfinite(float(threshold)) or not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError("gripper threshold must be finite and lie in [0, 1]")
+    return np.float32(1.0 if fraction >= threshold else 0.0)
 
 
 def _camera_matrix(info: Any) -> np.ndarray:
@@ -616,12 +660,10 @@ def _arrow_array(values: list[Any], shape: tuple[int, ...], dtype: str, pa: Any)
 class LeRobotV3Writer:
     """Small dependency-light writer for the public LeRobot v3 layout."""
 
-    def __init__(self, root: Path, fps: int, task: str, num_points: int, channels: int):
+    def __init__(self, root: Path, fps: int, task: str):
         self.root = root
         self.fps = fps
         self.task = task
-        self.num_points = num_points
-        self.channels = channels
         self.data_writer = None
         self.data_path: Path | None = None
         self.video_writers: dict[str, VideoWriter] = {}
@@ -665,39 +707,31 @@ class LeRobotV3Writer:
             "right_rot6d_row1_y",
             "right_rot6d_row1_z",
         ]
-        state_names = [
-            *(f"left_joint_{i}" for i in range(1, 8)),
-            *(f"right_joint_{i}" for i in range(1, 8)),
-            "left_gripper_open_fraction",
-            "right_gripper_open_fraction",
-        ]
+        state_names = [*vector_names, "left_gripper_open", "right_gripper_open"]
         self.features = {
-            "observation.state": {"dtype": "float32", "shape": [16], "names": state_names},
-            "observation.ee_pose": {"dtype": "float32", "shape": [18], "names": vector_names},
+            # These five columns are part of the LeRobot v3 data contract.  The
+            # loader builds the Arrow schema from info.json, so they must be
+            # declared even though they are not model input features.
+            "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+            "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+            "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+            "index": {"dtype": "int64", "shape": [1], "names": None},
+            "task_index": {"dtype": "int64", "shape": [1], "names": None},
+            "observation.state": {"dtype": "float32", "shape": [ACTION_DIM], "names": state_names},
             "action": {
                 "dtype": "float32",
                 "shape": [ACTION_DIM],
-                "names": [*vector_names, "left_gripper_open_fraction", "right_gripper_open_fraction"],
-            },
-            "observation.point_cloud": {
-                "dtype": "float32",
-                "shape": [self.num_points, self.channels],
-                "names": ["x", "y", "z", "r", "g", "b"][: self.channels],
+                "names": state_names,
             },
             "observation.source_timestamp_ns": {"dtype": "int64", "shape": [1], "names": None},
             "observation.sync_skew_ns": {
                 "dtype": "int64",
-                "shape": [9],
+                "shape": [4],
                 "names": [
-                    "depth",
                     "wrist_left",
                     "wrist_right",
                     "left_pose",
                     "right_pose",
-                    "left_joints",
-                    "right_joints",
-                    "left_gripper",
-                    "right_gripper",
                 ],
             },
         }
@@ -705,7 +739,7 @@ class LeRobotV3Writer:
             self.features[key] = {
                 "dtype": "video",
                 "shape": list(shape),
-                "names": ["height", "width", "channels"],
+                "names": ["height", "width", "channel"],
                 "info": {
                     "video.is_depth_map": False,
                     "video.height": shape[0],
@@ -734,9 +768,7 @@ class LeRobotV3Writer:
         ]
         for key in (
             "observation.state",
-            "observation.ee_pose",
             "action",
-            "observation.point_cloud",
             "observation.source_timestamp_ns",
             "observation.sync_skew_ns",
         ):
@@ -773,10 +805,6 @@ class LeRobotV3Writer:
                 "ee_pose must have shape (18,) and action must have shape (20,) "
                 "(dual-arm xyz + rot6d + two grippers)"
             )
-        if frame.point_cloud.shape != (self.num_points, self.channels):
-            raise ValueError(
-                f"point_cloud must have shape {(self.num_points, self.channels)}, got {frame.point_cloud.shape}"
-            )
         images = {
             "observation.images.head": frame.head_rgb,
             "observation.images.wrist_left": frame.wrist_left_rgb,
@@ -793,9 +821,7 @@ class LeRobotV3Writer:
             "index": int(self.total_frames),
             "task_index": 0,
             "observation.state": frame.state,
-            "observation.ee_pose": frame.ee_pose,
             "action": action,
-            "observation.point_cloud": frame.point_cloud,
             "observation.source_timestamp_ns": np.int64(frame.source_stamp_ns),
             "observation.sync_skew_ns": frame.source_skew_ns,
         }
@@ -827,9 +853,7 @@ class LeRobotV3Writer:
         )
         for key in (
             "observation.state",
-            "observation.ee_pose",
             "action",
-            "observation.point_cloud",
             "observation.source_timestamp_ns",
             "observation.sync_skew_ns",
         ):
@@ -916,13 +940,12 @@ class LeRobotV3Writer:
             "splits": {"train": f"0:{len(self.episode_metadata)}"},
         }
         (meta / "info.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+        # v3 stores tasks as a parquet DataFrame whose index is the task text.
+        # Keep the task index column aligned with the data parquet column.
         import pandas as pd
 
-        tasks = pd.DataFrame(
-            {"task_index": [0]},
-            index=pd.Index([self.task], name="task"),
-        )
-        tasks.to_parquet(meta / "tasks.parquet", compression="zstd")
+        tasks = pd.DataFrame({"task_index": np.asarray([0], dtype=np.int64)}, index=[self.task])
+        tasks.to_parquet(meta / "tasks.parquet")
         if self.episode_metadata:
             # Nested sync_stats are useful provenance but are not part of the
             # canonical reader contract; keep them as a JSON string column.
@@ -948,48 +971,22 @@ class EpisodeConverter:
         writer: LeRobotV3Writer,
         *,
         topics: Mapping[str, str] = DEFAULT_TOPICS,
-        num_points: int = 2048,
-        channels: int = 3,
-        sampling: str = "adaptive",
-        seed: int = 0,
-        fps_candidate_limit: int = 4096,
         rgb_tolerance_ms: float = 45.0,
-        depth_tolerance_ms: float = 16.0,
         state_tolerance_ms: float = 50.0,
-        min_depth: float = 0.05,
-        max_depth: float = 5.0,
-        workspace_min: Sequence[float] = DEFAULT_WORKSPACE_MIN,
-        workspace_max: Sequence[float] = DEFAULT_WORKSPACE_MAX,
         gripper_closed: float = 0.8,
         gripper_open: float = 0.0,
+        gripper_threshold: float = 0.5,
     ):
-        if channels != 3:
-            raise ValueError("channels must be 3 (XYZ-only point cloud)")
-        if sampling not in ("adaptive", "random", "fps"):
-            raise ValueError("sampling must be adaptive, random or fps")
-        if num_points <= 0 or fps_candidate_limit < num_points:
-            raise ValueError("num_points must be positive and fps_candidate_limit >= num_points")
         self.geometry = geometry
         self.writer = writer
         self.topics = dict(topics)
-        self.num_points = num_points
-        self.channels = channels
-        self.sampling = sampling
-        self.seed = seed
-        self.fps_candidate_limit = fps_candidate_limit
         self.tolerances = {
             "rgb": int(rgb_tolerance_ms * 1_000_000),
-            "depth": int(depth_tolerance_ms * 1_000_000),
             "state": int(state_tolerance_ms * 1_000_000),
         }
-        self.min_depth = min_depth
-        self.max_depth = max_depth
-        self.workspace_min = _finite_vec(workspace_min, 3, "workspace_min").astype(np.float32)
-        self.workspace_max = _finite_vec(workspace_max, 3, "workspace_max").astype(np.float32)
-        if not np.all(self.workspace_min < self.workspace_max):
-            raise ValueError("workspace_min must be strictly less than workspace_max")
         self.gripper_closed = gripper_closed
         self.gripper_open = gripper_open
+        self.gripper_threshold = gripper_threshold
 
     def _connections(self, reader: Any) -> list[Any]:
         by_topic: dict[str, list[Any]] = {}
@@ -1023,120 +1020,53 @@ class EpisodeConverter:
         reader: Any,
         target: TimedMessage,
         buffers: Mapping[str, TimedBuffer],
-        camera_info: Any,
         frame_index: int,
         stats: SyncStats,
     ) -> DerivedFrame | None:
-        depth = buffers["head_depth"].nearest(target.stamp_ns, self.tolerances["depth"])
         wrist_left = buffers["wrist_left_rgb"].nearest(target.stamp_ns, self.tolerances["rgb"])
         wrist_right = buffers["wrist_right_rgb"].nearest(target.stamp_ns, self.tolerances["rgb"])
         left_pose = buffers["left_pose"].nearest(target.stamp_ns, self.tolerances["state"])
         right_pose = buffers["right_pose"].nearest(target.stamp_ns, self.tolerances["state"])
-        left_joints = buffers["left_joints"].nearest(target.stamp_ns, self.tolerances["state"])
-        right_joints = buffers["right_joints"].nearest(target.stamp_ns, self.tolerances["state"])
         left_gripper = buffers["left_gripper"].nearest(target.stamp_ns, self.tolerances["state"])
         right_gripper = buffers["right_gripper"].nearest(target.stamp_ns, self.tolerances["state"])
-        if depth is None:
-            stats.dropped_missing_depth += 1
-            return None
         if wrist_left is None or wrist_right is None:
             stats.dropped_missing_wrist += 1
             return None
         if left_pose is None or right_pose is None:
             stats.dropped_missing_pose += 1
             return None
-        if any(item is None for item in (left_joints, right_joints, left_gripper, right_gripper)):
+        if left_gripper is None or right_gripper is None:
             stats.dropped_missing_state += 1
-            return None
-        if camera_info is None:
-            stats.dropped_missing_camera_info += 1
             return None
         try:
             head_rgb = image_msg_to_rgb(target.message)
-            left_rgb = resize_rgb(image_msg_to_rgb(wrist_left.message))
-            right_rgb = resize_rgb(image_msg_to_rgb(wrist_right.message))
-            # Keep the ZED 32FC1 meters payload at float32 precision for
-            # deprojection; live evaluation intentionally defaults to f16.
-            depth_m = depth_msg_to_meters(depth.message, 0.001, dtype=np.float32)
-            matrix = _camera_matrix(camera_info)
-            if depth_m.shape != head_rgb.shape[:2]:
-                raise ValueError(f"head RGB/depth shapes differ: {head_rgb.shape} and {depth_m.shape}")
-            info_width = int(getattr(camera_info, "width", depth_m.shape[1]))
-            info_height = int(getattr(camera_info, "height", depth_m.shape[0]))
-            if (info_height, info_width) != depth_m.shape:
-                raise ValueError(
-                    f"ZED CameraInfo dimensions {(info_height, info_width)} do not match depth {depth_m.shape}"
-                )
-            all_points = depth_to_point_cloud(
-                depth_m,
-                matrix,
-                extrinsics=self.geometry.base_from_zed_optical,
-                workspace_min=self.workspace_min,
-                workspace_max=self.workspace_max,
-                min_depth=self.min_depth,
-                max_depth=self.max_depth,
-                num_points=None,
-            )
-            if self.sampling == "adaptive":
-                points = adaptive_voxel_sample(
-                    all_points,
-                    self.num_points,
-                    seed=self.seed + frame_index,
-                )
-            elif self.sampling == "fps":
-                points = farthest_point_sample(
-                    all_points,
-                    self.num_points,
-                    seed=self.seed + frame_index,
-                    candidate_limit=self.fps_candidate_limit,
-                )
-            else:
-                rng = np.random.default_rng(self.seed + frame_index)
-                if all_points.shape[0] >= self.num_points:
-                    points = all_points[rng.choice(all_points.shape[0], self.num_points, replace=False)]
-                else:
-                    pad = rng.choice(all_points.shape[0], self.num_points - all_points.shape[0], replace=True)
-                    points = np.concatenate((all_points, all_points[pad]), axis=0)
+            left_rgb = image_msg_to_rgb(wrist_left.message)
+            right_rgb = image_msg_to_rgb(wrist_right.message)
             left_pose_transform = compose_transform(
                 self.geometry.base_from_left_arm, pose_to_transform(left_pose.message.pose)
             )
             right_pose_transform = compose_transform(
                 self.geometry.base_from_right_arm, pose_to_transform(right_pose.message.pose)
             )
-            state = np.concatenate(
-                (
-                    _joint_positions(left_joints.message, "left"),
-                    _joint_positions(right_joints.message, "right"),
-                    np.asarray(
-                        [
-                            gripper_open_fraction(
-                                self._gripper_position(left_gripper.message),
-                                closed_position=self.gripper_closed,
-                                open_position=self.gripper_open,
-                            ),
-                            gripper_open_fraction(
-                                self._gripper_position(right_gripper.message),
-                                closed_position=self.gripper_closed,
-                                open_position=self.gripper_open,
-                            ),
-                        ],
-                        dtype=np.float32,
-                    ),
-                )
+            ee_pose = np.concatenate(
+                (pose_vector(left_pose_transform), pose_vector(right_pose_transform))
             ).astype(np.float32)
+            gripper = np.asarray(
+                [
+                    self._gripper_state(left_gripper.message),
+                    self._gripper_state(right_gripper.message),
+                ],
+                dtype=np.float32,
+            )
+            state = np.concatenate((ee_pose, gripper)).astype(np.float32)
         except (TypeError, ValueError, OverflowError):
             stats.dropped_invalid_payload += 1
             return None
         source_values = {
-            "depth": depth,
             "wrist_left": wrist_left,
             "wrist_right": wrist_right,
             "left_pose": left_pose,
             "right_pose": right_pose,
-            "left_joints": left_joints,
-            "right_joints": right_joints,
-            "left_gripper": left_gripper,
-            "right_gripper": right_gripper,
         }
         skew = np.asarray(
             [item.stamp_ns - target.stamp_ns for item in source_values.values()], dtype=np.int64
@@ -1148,12 +1078,9 @@ class EpisodeConverter:
             head_rgb=head_rgb,
             wrist_left_rgb=left_rgb,
             wrist_right_rgb=right_rgb,
-            point_cloud=np.ascontiguousarray(points, dtype=np.float32),
             state=state,
-            ee_pose=np.concatenate(
-                (pose_vector(left_pose_transform), pose_vector(right_pose_transform))
-            ).astype(np.float32),
-            gripper=state[-2:].copy(),
+            ee_pose=ee_pose,
+            gripper=gripper,
             left_pose_frame_id=str(getattr(getattr(left_pose.message, "header", None), "frame_id", "")),
             right_pose_frame_id=str(getattr(getattr(right_pose.message, "header", None), "frame_id", "")),
         )
@@ -1166,6 +1093,14 @@ class EpisodeConverter:
             raise ValueError("gripper calibration endpoints must be finite")
         return value
 
+    def _gripper_state(self, message: Any) -> np.float32:
+        return _binary_gripper_state(
+            self._gripper_position(message),
+            closed_position=self.gripper_closed,
+            open_position=self.gripper_open,
+            threshold=self.gripper_threshold,
+        )
+
     def convert_episode(
         self, episode_dir: Path, output_episode_index: int
     ) -> tuple[SyncStats, dict[str, Any]]:
@@ -1175,21 +1110,14 @@ class EpisodeConverter:
         sidecar = _load_episode_manifest(episode_dir)
         stats = SyncStats()
         buffers = {
-            # Image payloads are large; a few hundred milliseconds is enough
-            # to cover the configured timestamp tolerances without retaining a
-            # substantial fraction of a multi-GB bag.
-            "head_depth": TimedBuffer(16),
             "wrist_left_rgb": TimedBuffer(16),
             "wrist_right_rgb": TimedBuffer(16),
             "left_pose": TimedBuffer(256),
             "right_pose": TimedBuffer(256),
-            "left_joints": TimedBuffer(256),
-            "right_joints": TimedBuffer(256),
             "left_gripper": TimedBuffer(256),
             "right_gripper": TimedBuffer(256),
         }
         pending: deque[TimedMessage] = deque(maxlen=8)
-        camera_info = None
         previous: DerivedFrame | None = None
         event_records: list[dict[str, Any]] = []
         pose_frame_ids = {"left": set[str](), "right": set[str]()}
@@ -1206,7 +1134,7 @@ class EpisodeConverter:
                 nonlocal previous, frame_index
                 while pending and (force or watermark_ns >= pending[0].receipt_ns + flush_ns):
                     target = pending.popleft()
-                    current = self._build_frame(reader, target, buffers, camera_info, frame_index, stats)
+                    current = self._build_frame(reader, target, buffers, frame_index, stats)
                     if current is None:
                         frame_index += 1
                         continue
@@ -1236,9 +1164,7 @@ class EpisodeConverter:
             for connection, receipt_ns, raw in reader.messages(connections=connections):
                 key = topic_to_key[connection.topic]
                 message = reader.deserialize(raw, connection.msgtype)
-                if key == "head_info":
-                    camera_info = message
-                elif key == "episode_event":
+                if key == "episode_event":
                     payload = getattr(message, "data", "")
                     if isinstance(payload, (str, bytes, bytearray)):
                         try:
@@ -1293,34 +1219,23 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--usd", type=Path, required=True)
-    parser.add_argument("--num-points", type=int, default=2048)
+    parser.add_argument("--usd", type=Path)
     parser.add_argument(
-        "--channels", type=int, choices=(3,), default=3, help="point-cloud channels; XYZ-only"
+        "--geometry-manifest",
+        type=Path,
+        help="existing derived_manifest.json containing validated coordinate transforms",
     )
-    parser.add_argument("--sampling", choices=("adaptive", "fps", "random"), default="adaptive")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--fps-candidate-limit", type=int, default=4096)
-    parser.add_argument("--fps", type=int, default=15)
+    parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--rgb-tolerance-ms", type=float, default=45.0)
-    parser.add_argument("--depth-tolerance-ms", type=float, default=16.0)
     parser.add_argument("--state-tolerance-ms", type=float, default=50.0)
-    parser.add_argument("--min-depth", type=float, default=0.05)
-    parser.add_argument("--max-depth", type=float, default=5.0)
-    parser.add_argument(
-        "--workspace-min",
-        type=_floats,
-        default=DEFAULT_WORKSPACE_MIN,
-        help="base-frame point-cloud lower bound x,y,z (meters)",
-    )
-    parser.add_argument(
-        "--workspace-max",
-        type=_floats,
-        default=DEFAULT_WORKSPACE_MAX,
-        help="base-frame point-cloud upper bound x,y,z (meters)",
-    )
     parser.add_argument("--gripper-closed", type=float, default=0.8)
     parser.add_argument("--gripper-open", type=float, default=0.0)
+    parser.add_argument(
+        "--gripper-threshold",
+        type=float,
+        default=0.5,
+        help="normalized opening at or above which the binary gripper state is 1",
+    )
     parser.add_argument("--task", default="franka duo manipulation")
     parser.add_argument(
         "--mount-to-optical", type=_floats, default=None, help="nominal mount->optical 4x4 override"
@@ -1341,35 +1256,27 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--mount-to-optical must contain sixteen values")
     if args.base_rotation is not None and len(args.base_rotation) != 9:
         raise ValueError("--base-rotation must contain nine values")
-    if len(args.workspace_min) != 3 or len(args.workspace_max) != 3:
-        raise ValueError("--workspace-min and --workspace-max must each contain three values")
-    if args.channels != 3:
-        raise ValueError("this converter stores XYZ-only point clouds; --channels must be 3")
-    geometry = load_usd_geometry(
-        args.usd,
-        mount_to_optical=args.mount_to_optical,
-        base_rotation=args.base_rotation,
-    )
-    writer = LeRobotV3Writer(
-        args.output.expanduser().resolve(), args.fps, args.task, args.num_points, args.channels
-    )
+    if args.usd is not None and args.geometry_manifest is not None:
+        raise ValueError("use either --usd or --geometry-manifest, not both")
+    if args.geometry_manifest is not None:
+        geometry = load_geometry_manifest(args.geometry_manifest)
+    elif args.usd is not None:
+        geometry = load_usd_geometry(
+            args.usd,
+            mount_to_optical=args.mount_to_optical,
+            base_rotation=args.base_rotation,
+        )
+    else:
+        raise ValueError("one of --usd or --geometry-manifest is required")
+    writer = LeRobotV3Writer(args.output.expanduser().resolve(), args.fps, args.task)
     converter = EpisodeConverter(
         geometry,
         writer,
-        num_points=args.num_points,
-        channels=args.channels,
-        sampling=args.sampling,
-        seed=args.seed,
-        fps_candidate_limit=args.fps_candidate_limit,
         rgb_tolerance_ms=args.rgb_tolerance_ms,
-        depth_tolerance_ms=args.depth_tolerance_ms,
         state_tolerance_ms=args.state_tolerance_ms,
-        min_depth=args.min_depth,
-        max_depth=args.max_depth,
-        workspace_min=args.workspace_min,
-        workspace_max=args.workspace_max,
         gripper_closed=args.gripper_closed,
         gripper_open=args.gripper_open,
+        gripper_threshold=args.gripper_threshold,
     )
     episode_reports = []
     output_episode_index = 0
@@ -1383,39 +1290,26 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
             output_episode_index += 1
     writer.finalize()
     manifest = {
-        "schema": "franka_duo_tele_data.mcap_to_lerobot.v2",
+        "schema": "franka_duo_tele_data.mcap_to_lerobot.rgb20d.v1",
         "source_root": str(args.input_root.expanduser().resolve()),
         "output": str(args.output.expanduser().resolve()),
         "fps": args.fps,
         "task": args.task,
-        "pointcloud": {
-            "num_points": args.num_points,
-            "channels": args.channels,
-            "sampling": args.sampling,
-            "seed": args.seed,
-            "candidate_limit": args.fps_candidate_limit,
-            "min_depth": args.min_depth,
-            "max_depth": args.max_depth,
-            "workspace_min": list(args.workspace_min),
-            "workspace_max": list(args.workspace_max),
-            "input": "ZED registered depth deprojected with CameraInfo.k and transformed into midpoint base",
-            "output": "XYZ-only base-frame points; adaptive voxel representatives and deterministic thinning",
-        },
         "images": {
-            "wrist_left": {"resize": [256, 256], "channels": 3},
-            "wrist_right": {"resize": [256, 256], "channels": 3},
+            "wrist_left": {"resize": None, "channels": 3},
+            "wrist_right": {"resize": None, "channels": 3},
             "head": {"resize": None, "channels": 3},
         },
-        "state": "16D measured state: left 7 joints, right 7 joints, left/right actual gripper open fraction",
+        "state": "20D: left/right EE pose (9D each) plus binary left/right gripper state",
         "observation_ee_pose": "18D: left xyz+rot6d_rows followed by right xyz+rot6d_rows, relative to midpoint base",
         "pose_rotation_representation": "rot6d_rows: first two rows of each 3x3 rotation matrix flattened row-major",
         "pose_frame_assumption": "left/right current_pose payloads are respectively relative to their arm base links; static USD link0-to-midpoint transforms are applied",
         # Keep the human-readable legacy field and expose the machine-readable
         # action contract separately for real-robot bundle exporters.
         "action": (
-            "20D next valid synchronized frame target after 15Hz resampling: "
+            "20D next valid synchronized frame target after 30Hz resampling: "
             "left/right xyz+rot6d_rows followed by normalized left/right gripper "
-            "open fractions."
+            "states in {0,1}."
         ),
         "action_dim": ACTION_DIM,
         "action_spec": {
@@ -1430,21 +1324,28 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
             },
             "ee_format": "xyz + continuous rot6d (first two rotation-matrix rows flattened row-major)",
             "gripper_range": [0.0, 1.0],
+            "gripper_encoding": "binary thresholded open state",
         },
         "sync": {
             "anchor": "ZED RGB header stamp",
-            "zed_stream": "head RGB and registered depth are matched to the same ZED RGB anchor; output is fixed 15Hz by default",
+            "zed_stream": "head RGB is the timestamp anchor; wrist RGB, EE poses and gripper states are matched to it; output is fixed 30Hz by default",
             "output_rate_sampling": "keep first valid synchronized frame on each fixed --fps grid",
             "rgb_tolerance_ms": args.rgb_tolerance_ms,
-            "depth_tolerance_ms": args.depth_tolerance_ms,
             "state_tolerance_ms": args.state_tolerance_ms,
             "drop_last_frame_without_next_action": True,
         },
-        "gripper_calibration": {"closed_position": args.gripper_closed, "open_position": args.gripper_open},
+        "gripper_calibration": {
+            "closed_position": args.gripper_closed,
+            "open_position": args.gripper_open,
+            "threshold": args.gripper_threshold,
+            "encoding": "0=closed, 1=open",
+        },
         "coordinate_transforms": geometry.manifest(),
         "episodes": episode_reports,
     }
-    (args.output.expanduser().resolve() / "meta" / "derived_manifest.json").write_text(
+    extras = args.output.expanduser().resolve() / "franka_duo_extras"
+    extras.mkdir(parents=True, exist_ok=True)
+    (extras / "derived_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
     return manifest

@@ -1,0 +1,41 @@
+{
+  "schema": "franka_duo_grasp_stage_poses_v1",
+  "description": "Dual-arm EE poses for the table mission. Reached through the joint servo and the site joint_impedance_controller, never through PTP: the same path the grasp chunk uses. travel_stow is required; camera_clear and grasp_ready are optional and are skipped while null, in which case the stage detects and grasps from the pose the arms are already in.",
+  "taught": false,
+  "spine_height_m": 0.468,
+  "travel_spine_height_m": 0.700,
+  "pose_frame": "midpoint base",
+  "pose_format": "18D: left xyz+rot6d_rows, right xyz+rot6d_rows",
+  "poses": {
+    "travel_stow": {
+      "description": "Both arms folded inside the navigation footprint (front/rear 0.40 m, width 0.58 m from start_to_pickup.yaml) so the base collision envelope holds while driving. Captured from the live arms on 2026-09-07. Arm poses only: the spine height at capture time was not trusted, so this posture is reached at whatever travel height the mission commands.",
+      "action": [
+        0.454579, 0.217403, 0.196443,
+        -0.379061, 0.924249, 0.045574,
+        0.919796, 0.370922, 0.12803,
+        0.518465, -0.143479, 0.256733,
+        0.79938, -0.59276, -0.09812,
+        -0.598115, -0.800585, -0.036348
+      ],
+      "grippers": [1.0, 1.0]
+    },
+    "camera_clear": {
+      "description": "Both arms retracted clear of the head ZED view. The right arm hid half the tray during the 2026-09-07 dry run, so an empty view must be confirmed before detection is trusted.",
+      "action": null,
+      "grippers": [1.0, 1.0]
+    },
+    "grasp_ready": {
+      "description": "Grasp start posture. Left reaches the bowl, right reaches the cup. grasp_cup_bowl builds its chunk from the current pose, so this is the anchor it starts from.",
+      "action": null,
+      "grippers": [1.0, 1.0]
+    }
+  },
+  "approach": {
+    "comment": "Interpolation bounds for the transfer chunk into each pose. Kept at or below the grasp step limits so the impedance controller sees the same continuity it was tuned for.",
+    "step_m": 0.01,
+    "step_rad": 0.08,
+    "settle_rows": 6,
+    "max_first_offset_m": 0.03,
+    "max_first_offset_rad": 0.3
+  }
+}

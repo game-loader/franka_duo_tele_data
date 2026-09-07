@@ -44,6 +44,12 @@ policy_action_relay
 
 ## 固定训练坐标转换
 
+RGB20D runtime 会根据数据集 manifest 先转换到 link0，因此使用独立的
+`rgb20d_relay.launch.py`（`action_frame=link0`）跳过此处的固定转换。
+旧入口默认仍是 `action_frame=midpoint`。两种模式不可叠加转换。
+控制器默认 `target_timeout_s=0.25`，目标停止更新后按既有加速度/jerk 限制减速。
+完整使用说明见主仓库 `docs/RGB20D_REPLAY.md`。
+
 不在现场 YAML 中配置 arm-base 矩阵。矩阵固定来自采数/训练使用的
 `mobile_fr3_duo_v0_2.usd`，遵循列向量约定：
 

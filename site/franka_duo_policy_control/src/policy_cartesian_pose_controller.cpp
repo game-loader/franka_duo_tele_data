@@ -4,6 +4,7 @@
 #include "franka_duo_policy_control/policy_cartesian_pose_controller.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <stdexcept>
@@ -40,6 +41,8 @@ CallbackReturn PolicyCartesianPoseController::on_init() {
     auto_declare<std::string>("target_topic", "");
     auto_declare<std::string>("expected_frame_id", "");
     auto_declare<bool>("allow_motion", false);
+    auto_declare<double>("target_timeout_s", 0.25);
+    auto_declare<std::string>("smoothing_backend", "ruckig_velocity_v1");
     auto_declare<double>("linear_kp", 16.0);
     auto_declare<double>("linear_kd", 8.0);
     auto_declare<double>("linear_max_velocity", 0.15);
@@ -55,6 +58,10 @@ CallbackReturn PolicyCartesianPoseController::on_init() {
     target_topic_ = get_node()->get_parameter("target_topic").as_string();
     expected_frame_id_ = get_node()->get_parameter("expected_frame_id").as_string();
     allow_motion_ = get_node()->get_parameter("allow_motion").as_bool();
+    target_timeout_s_ = get_node()->get_parameter("target_timeout_s").as_double();
+    if (!std::isfinite(target_timeout_s_) || target_timeout_s_ <= 0.0) {
+      throw std::invalid_argument("target_timeout_s must be finite and positive");
+    }
     linear_kp_ = get_node()->get_parameter("linear_kp").as_double();
     linear_kd_ = get_node()->get_parameter("linear_kd").as_double();
     linear_max_velocity_ = get_node()->get_parameter("linear_max_velocity").as_double();
@@ -83,6 +90,8 @@ CallbackReturn PolicyCartesianPoseController::on_init() {
         throw std::invalid_argument("Cartesian servo parameters must be finite and positive");
       }
     }
+    linear_servo_.configure(linear_max_velocity_, linear_max_acceleration_, linear_max_jerk_);
+    angular_servo_.configure(angular_max_velocity_, angular_max_acceleration_, angular_max_jerk_);
 
     franka_cartesian_pose_ =
         std::make_unique<franka_semantic_components::FrankaCartesianPoseInterface>(
@@ -99,7 +108,7 @@ CallbackReturn PolicyCartesianPoseController::on_configure(
   target_pose_buffer_.initRT(TargetPose{});
   target_subscription_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
       target_topic_,
-      rclcpp::QoS(10).reliable(),
+      rclcpp::QoS(1).reliable(),
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
         equilibriumPoseCallback(message);
       });
@@ -139,11 +148,9 @@ CallbackReturn PolicyCartesianPoseController::on_activate(
     }
     orientation_init.normalize();
     position_d_ = position_init;
-    linear_velocity_d_.setZero();
-    linear_acceleration_d_.setZero();
+    linear_servo_.reset();
     orientation_d_ = orientation_init;
-    angular_velocity_d_.setZero();
-    angular_acceleration_d_.setZero();
+    angular_servo_.reset();
 
     TargetPose initial_target;
     initial_target.position = position_init;
@@ -206,52 +213,40 @@ void PolicyCartesianPoseController::equilibriumPoseCallback(
     return;
   }
   target.orientation.normalize();
+  target.received_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
   target_pose_buffer_.writeFromNonRT(target);
 }
 
 controller_interface::return_type PolicyCartesianPoseController::update(
     const rclcpp::Time& /*time*/,
-    const rclcpp::Duration& period) {
+    const rclcpp::Duration& /*period*/) {
   if (!interfaces_assigned_ || franka_cartesian_pose_ == nullptr) {
     return controller_interface::return_type::ERROR;
   }
 
-  const TargetPose target = *target_pose_buffer_.readFromRT();
+  TargetPose target = *target_pose_buffer_.readFromRT();
+  const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (target.received_ns == 0 ||
+      static_cast<double>(steady_ns - target.received_ns) * 1e-9 > target_timeout_s_) {
+    // Brake with the existing acceleration/jerk limits. Do not jump to a
+    // measured pose or reset derivatives when input stops or chunks change.
+    target.position = position_d_;
+    target.orientation = orientation_d_;
+  }
   if (allow_motion_) {
-    double dt = period.seconds();
-    if (!std::isfinite(dt) || dt < 0.0005 || dt > 0.002) {
-      dt = 0.001;
+    // Keep the FCI command trajectory on a fixed 1 kHz clock. Scaling position
+    // increments by host scheduling jitter introduces command derivative jumps.
+    Eigen::Vector3d linear_step, angular_step;
+    if (!linear_servo_.step((linear_kp_ / linear_kd_) * (target.position - position_d_), linear_step) ||
+        !angular_servo_.step(
+            (angular_kp_ / angular_kd_) * orientationError(orientation_d_, target.orientation),
+            angular_step)) {
+      RCLCPP_ERROR(get_node()->get_logger(), "Ruckig failed to calculate a bounded Cartesian command");
+      return controller_interface::return_type::ERROR;
     }
-
-    updateServoState(
-        target.position,
-        dt,
-        linear_kp_,
-        linear_kd_,
-        linear_max_velocity_,
-        linear_max_acceleration_,
-        linear_max_jerk_,
-        position_d_,
-        linear_velocity_d_,
-        linear_acceleration_d_);
-
-    const Eigen::Vector3d orientation_target_error =
-        orientationError(orientation_d_, target.orientation);
-    const Eigen::Vector3d desired_angular_acceleration =
-        clampNorm(
-            angular_kp_ * orientation_target_error - angular_kd_ * angular_velocity_d_,
-            angular_max_acceleration_);
-    const Eigen::Vector3d angular_acceleration_delta =
-        clampNorm(
-            desired_angular_acceleration - angular_acceleration_d_,
-            angular_max_jerk_ * dt);
-    angular_acceleration_d_ =
-        clampNorm(angular_acceleration_d_ + angular_acceleration_delta, angular_max_acceleration_);
-    angular_velocity_d_ =
-        clampNorm(angular_velocity_d_ + angular_acceleration_d_ * dt, angular_max_velocity_);
-
-    const Eigen::Vector3d angular_step =
-        angular_velocity_d_ * dt + 0.5 * angular_acceleration_d_ * dt * dt;
+    position_d_ += linear_step;
     const double angular_step_norm = angular_step.norm();
     if (std::isfinite(angular_step_norm) && angular_step_norm > 1e-12) {
       orientation_d_ =
@@ -274,16 +269,6 @@ controller_interface::return_type PolicyCartesianPoseController::update(
   return controller_interface::return_type::OK;
 }
 
-Eigen::Vector3d PolicyCartesianPoseController::clampNorm(
-    const Eigen::Vector3d& value,
-    double limit) {
-  const double norm = value.norm();
-  if (!std::isfinite(norm) || norm <= limit || norm < 1e-12) {
-    return value;
-  }
-  return value * (limit / norm);
-}
-
 Eigen::Vector3d PolicyCartesianPoseController::orientationError(
     const Eigen::Quaterniond& current,
     const Eigen::Quaterniond& target) {
@@ -299,27 +284,6 @@ Eigen::Vector3d PolicyCartesianPoseController::orientationError(
     return Eigen::Vector3d::Zero();
   }
   return error.vec() * (angle / sine_half_angle);
-}
-
-void PolicyCartesianPoseController::updateServoState(
-    const Eigen::Vector3d& target,
-    double dt,
-    double kp,
-    double kd,
-    double max_velocity,
-    double max_acceleration,
-    double max_jerk,
-    Eigen::Vector3d& position,
-    Eigen::Vector3d& velocity,
-    Eigen::Vector3d& acceleration) {
-  const Eigen::Vector3d error = target - position;
-  const Eigen::Vector3d desired_acceleration =
-      clampNorm(kp * error - kd * velocity, max_acceleration);
-  const Eigen::Vector3d acceleration_delta =
-      clampNorm(desired_acceleration - acceleration, max_jerk * dt);
-  acceleration = clampNorm(acceleration + acceleration_delta, max_acceleration);
-  velocity = clampNorm(velocity + acceleration * dt, max_velocity);
-  position += velocity * dt + 0.5 * acceleration * dt * dt;
 }
 
 }  // namespace franka_duo_policy_control

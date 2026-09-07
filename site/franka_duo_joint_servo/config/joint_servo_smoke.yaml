@@ -1,0 +1,18 @@
+# Conservative first-motion limits for the recorded RGB20D trajectory test.
+# Servo-side limits are per joint (rad); playback_speed scales the timeline.
+franka_duo_joint_servo:
+  ros__parameters:
+    action_frame: link0
+    tool_offset_z_m: 0.174
+    playback_speed: 0.1
+    action_rate_hz: 30.0
+    servo_rate_hz: 1000.0
+    commit_lead_steps: 3
+    blend_steps: 4
+    max_joint_velocity_rad_s: [0.8]
+    max_joint_acceleration_rad_s2: [2.0]
+    max_joint_jerk_rad_s3: [20.0]
+    max_joint_delta_rad: 0.35
+    max_tracking_error_rad: 0.15
+    joint_state_timeout_s: 0.2
+    enable_gripper: false

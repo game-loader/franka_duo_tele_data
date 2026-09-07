@@ -17,6 +17,7 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
+find_package(ruckig REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
@@ -27,7 +28,7 @@ target_include_directories(policy_cartesian_controllers PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:include>"
 )
-target_link_libraries(policy_cartesian_controllers Eigen3::Eigen)
+target_link_libraries(policy_cartesian_controllers Eigen3::Eigen ruckig::ruckig)
 ament_target_dependencies(policy_cartesian_controllers
   controller_interface
   franka_semantic_components
@@ -88,6 +89,9 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_action_math PRIVATE include)
   target_link_libraries(test_action_math Eigen3::Eigen)
+  ament_add_gtest(test_velocity_servo test/test_velocity_servo.cpp)
+  target_include_directories(test_velocity_servo PRIVATE include)
+  target_link_libraries(test_velocity_servo Eigen3::Eigen ruckig::ruckig)
 endif()
 
 ament_package()

@@ -331,47 +331,42 @@ uv run --extra postprocess franka-duo-mcap-to-lerobot \
   --input-root /Users/logicluo/Downloads/franka_duo_tmr_raw_v1 \
   --output /data/franka_duo_tmr_lerobot_v3 \
   --usd /path/to/benchmark/assets/mobile_fr3_duo_v0_2.usd \
-  --fps 15 --num-points 2048 --sampling adaptive --channels 3 \
-  --workspace-min 0.4,-0.3,-0.3 --workspace-max 1.2,0.3,0.3 \
-  --min-depth 0.05 --max-depth 5.0
+  --fps 30 --gripper-closed 0.8 --gripper-open 0.0 --gripper-threshold 0.5
 ```
 
 `postprocess` extra 只安装 `rosbags`、`mcap`、`usd-core`、`pyarrow`、`pandas` 和 `av`，不会进入
 现场 recorder 的基础环境。转换器按下面的顺序执行：
 
 1. 读取 rosbag receipt timestamp 和原消息 `header.stamp`，验证每个 required topic 数量、
-   时间单调性、消息类型、尺寸和 CameraInfo；
+   时间单调性、消息类型和 RGB 尺寸；深度和 CameraInfo 保留在 raw MCAP，但不进入训练特征；
 2. 用 `episode_event` 验证 start，用 manifest 验证 end/outcome/reward，不把元数据时间当图像时间；
-3. 用新的 head RGB header stamp 作为目标帧，按明确阈值匹配 registered depth、左右 wrist、
-   rate100 relay 中的 current pose、measured joints 和夹爪实际状态；这些状态使用保留的
-   source header stamp，缺失时使用 relay receipt timestamp。有效同步帧随后按 `--fps` 固定
-   时间网格抽样，避免旧 bag 中约 24.2 Hz 的 ZED 源帧被错误标成 15 Hz；每个抽样帧仍保留
-   自己的 source stamp/skew；
-4. 按训练任务明确选择并版本化 action/state 表示，记录每个派生帧对应的所有 source
-   timestamp 和 skew；
-5. 将三路 RGB 编为 `videos/<feature>/chunk-000/file-000.mp4`，低维数据写入
-   `data/chunk-000/file-000.parquet`，并生成标准 `meta/info.json`、`stats.json`、
-   `tasks.parquet` 和 `meta/episodes/...parquet`；
-6. 同时写 `meta/derived_manifest.json`，其中保存 source stamp/skew 所在字段的定义、drop
-   统计、点云参数、夹爪标定和全部固定坐标矩阵；每帧实际的 timestamp/skew 保存在 Parquet
-   的 `observation.source_timestamp_ns` 和 `observation.sync_skew_ns` 列。
+3. 以头部 RGB 的 `header.stamp` 为唯一时间轴，匹配左右 wrist RGB、左右 current pose 和左右
+   gripper state；有效帧按固定 30 FPS 网格保留。三路 RGB 使用原始 HWC 分辨率，不 resize，
+   每个 timestep 同时写入三个视频。
+4. `observation.state` 为 20D：左/右各 9D 末端位姿，加左右二值夹爪状态；`action` 为下一
+   有效同步帧的同样 20D。夹爪按标定端点归一化后以阈值二值化，只输出 `0` 或 `1`。
+5. 生成 `meta/info.json`、`meta/stats.json`、`meta/tasks.parquet`、`meta/episodes/...parquet`、
+   `data/...parquet`、三路 `videos/`，以及 `franka_duo_extras/derived_manifest.json`。
 
-### 点云与坐标变换
+### RGB20D 采集端输入与黑盒回放
+
+`bash scripts/run_rgb20d_replay.sh --dataset /path/to/dataset --all-episodes`
+在采集机器上验证三路 RGB、20D state、下一帧 action chunk 和坐标转换。
+`--live` 使用真实 ROS 输入，默认不发布；只有同时传入 `--publish --enable-robot`
+才连接独立的 RGB20D relay 与常驻 Cartesian 控制器。该入口保持 30 Hz 指令更新，
+默认以 0.1 倍速度回放单个 episode 的前 60 帧，不录制 MCAP。
+`--recorded-actions` 用于不依赖相机的真机数据集动作测试，仍要求实时位姿和夹爪反馈；
+需要记录原始评估数据时显式增加 `--record-mcap`。
+旧 DP3 的点云/34D state evaluator 与 JTC chunk 路径不用于此入口。
+接口、控制器准备与完整命令见 [RGB20D_REPLAY.md](docs/RGB20D_REPLAY.md)。
+
+### 末端位姿坐标变换
 
 `mobile_fr3_duo_v0_2.usd` 中已确认：`/left_fr3v2_link0` 和 `/right_fr3v2_link0` 的
 世界坐标分别为 `(0.44190, +0.05018, 0.500885)` 和 `(0.44190, -0.05018, 0.500885)`。
 所以新 `base` 取两者原点中点 `(0.44190, 0, 0.500885)`，方向采用 USD 根坐标方向；不对
-左右镜像四元数做平均。USD 没有 ZED prim，转换器使用 `/head_camera_mounting_point` 作为
-ZED 安装点，并把 ROS optical 约定 `(x right, y down, z forward)` 的
-`mount -> zed_left_camera_frame_optical` 作为默认 nominal 外参。现场完成标定后可用
-`--mount-to-optical m00,...,m33` 覆盖，覆盖矩阵会原样写进 derived manifest。
-
-对样例 `franka_duo_tmr_raw_v1` 的 `/tf` 和 `/tf_static` 检查得到四个不连通组件：
-机器人主体（`base`、双臂和移动底盘）、Robotiq 夹爪、双 D405 wrist 相机、ZED 相机链。
-ZED 链只有 `zed_camera_link -> zed_camera_center -> zed_left/right_camera_frame(_optical)`，
-没有 `base` 或 `head` 到 `zed_camera_link` 的边；wrist 链也没有接到机械臂。故这份 bag 的
-TF 不能直接提供相机到新 base 的外参，转换器使用 USD nominal 矩阵，实机训练前应以测量的
-静态外参替换。
+左右镜像四元数做平均。本次 RGB-only 转换不读取 ZED depth、CameraInfo 或点云外参；USD
+只用于将左右 current_pose 转换到共同的中点 base。
 
 代码中所有矩阵均为列向量约定：
 
@@ -379,15 +374,6 @@ TF 不能直接提供相机到新 base 的外参，转换器使用 USD nominal �
 T_A_from_C = T_A_from_B @ T_B_from_C
 p_A = T_A_from_C @ [p_C, 1]
 ```
-
-参考实现为 [RL100](https://github.com/Starsshine21/RL100) 的
-`3D-Diffusion-Policy/diffusion_policy_3d/gym_util/mujoco_point_cloud.py` 和
-`gym_util/mjpc_wrapper.py`。每帧先用 ZED `CameraInfo.k` 将 registered `depth/depth_registered` 解投影到 ZED optical
-系，得到 XYZ，再乘 `T_newbase_from_zed_optical`，并按 base 工作空间
-`x∈[0.4,1.2]、y,z∈[-0.3,0.3]` 裁剪。默认使用自适应 voxel：自动选择体素边长，
-每个体素保留距离体素中心最近的真实 XYZ 点，再做空间均匀删减，最终每帧精确输出
-`2048×3`；不保存 RGB 点云信息。需要对照 RL100 的 FPS 时仍可显式指定
-`--sampling fps`，但它的 CPU 成本更高。
 
 双臂 `current_pose` 按用户约定视为各自 Franka base link 下的末端 pose，先转为
 `T_armbase_from_ee`，再计算：
@@ -405,33 +391,24 @@ measured joints 伪造末端 pose。
 
 ### 对齐、state 与 action
 
-每个候选帧的时间轴是 ZED RGB 的 `header.stamp`。转换器从有界时间缓存中匹配最近的 depth、
-左右 wrist RGB、左右 current pose、左右 measured joints 和左右 gripper state；带 header
+每个候选帧的时间轴是头部 RGB 的 `header.stamp`。转换器从有界时间缓存中匹配最近的左右
+wrist RGB、左右 current pose 和左右 gripper state；带 header
 的 topic 使用 header stamp，无 header 时使用 rosbag receipt timestamp。匹配阈值由
-`--rgb-tolerance-ms`、`--depth-tolerance-ms`、`--state-tolerance-ms` 控制，结果的 9 路
-skew 会保存为 `observation.sync_skew_ns`。匹配成功后以首个有效帧为起点，按 `--fps` 的
+`--rgb-tolerance-ms`、`--state-tolerance-ms` 控制，结果的 4 路
+skew 会保存为 `observation.sync_skew_ns`。匹配成功后以首个有效帧为起点，按 `--fps=30` 的
 固定网格保留每个网格之后的第一帧；被丢弃的源帧计入 `dropped_resampled`，输出 Parquet/video
 的 `timestamp` 始终是连续的 `frame_index / fps`。
 
-`observation.state` 是 16D measured state：左 7 个关节、右 7 个关节、左右 actual
-gripper open fraction。`action` 是 15Hz 重采样后下一个**有效同步帧**的 18D 双臂相对新
-base 末端 pose，旋转使用 `rot6d_rows`；最后一个没有下一帧的候选会丢弃。raw bag 没有 gripper target，故
-不会把 actual gripper state 冒充 action，也不会恢复旧的 20D/16D action contract。
+`observation.state` 是 20D：左右各 9D 末端位姿，加左右二值 gripper state。`action` 是
+30Hz 重采样后下一个**有效同步帧**的同样 20D；末两维使用下一同步帧的夹爪状态，只输出
+`0` 或 `1`。raw bag 没有独立的 gripper target command，最后一个没有下一帧的候选会丢弃。
 
-`desired_joint_states` 因现场不变化而明确不录。因此这些 MCAP **不能**恢复旧的 16D
-desired-joint action，转换器也不得复制 measured joints、填零或前向填充来伪造它。当前每侧
-可用的机械臂原始量是 `current_pose` 和 `measured_joint_states`；夹爪只保留 actual joint
-state，不包含 target command。
-后续 LeRobot action 可以选择经验证的 EE target、夹爪 target 或其他比赛控制表示，但必须先单独定义维度、坐标系、时间
-horizon 和归一化，再写入派生数据 manifest。
-
-16D measured state 仍可在完成夹爪标定后离线构造：左右各 7 个 measured joint position，
-再加左右夹爪 actual open fraction。它只是 observation state，不是 action。由于 raw MCAP 不含
-夹爪 target，任何包含夹爪 action 的派生 action 必须来自另一个明确版本化的数据源或控制日志，
-不得用 actual state 冒充 target。
+`desired_joint_states` 因现场不变化而明确不录；本次 RGB-only 数据集不读取 measured joint
+positions，state 只使用录制的 current_pose 和 gripper state。夹爪 action 的语义是下一帧
+实际开合状态的二值编码，不声称这是未录制的 target command。
 
 转换器必须显式记录同步策略、阈值、drop/missing 统计、夹爪 joint 选择与两侧各自标定，不得
-用 measured state 冒充 action，也不得为 spine/base/world EE 填零。当前后处理直接使用录制的
+用 measured joint state 冒充 action，也不得为 spine/base/world EE 填零。当前后处理直接使用录制的
 `current_pose`，在确认其语义为各自 Franka base link 后乘以 USD 静态变换；若现场只有关节
 状态，则应另行用真实 URDF 做 FK。除非整条相机外参链已校准并验证，否则不能把 nominal
 转换结果称为精确 world pose。

@@ -25,6 +25,7 @@ class PolicyActionRelay final : public rclcpp::Node {
  public:
   PolicyActionRelay() : Node("franka_duo_policy_action_relay") {
     declare_parameter<std::string>("input_topic", "/franka_duo/policy_action");
+    declare_parameter<std::string>("action_frame", "midpoint");
     declare_parameter<std::string>("left_pose_topic", "/franka_duo/policy/left/target_pose");
     declare_parameter<std::string>("right_pose_topic", "/franka_duo/policy/right/target_pose");
     declare_parameter<std::string>(
@@ -37,6 +38,10 @@ class PolicyActionRelay final : public rclcpp::Node {
     declare_parameter<bool>("enable_gripper", false);
 
     input_topic_ = get_parameter("input_topic").as_string();
+    action_frame_ = get_parameter("action_frame").as_string();
+    if (action_frame_ != "midpoint" && action_frame_ != "link0") {
+      throw std::invalid_argument("action_frame must be midpoint or link0");
+    }
     left_pose_topic_ = get_parameter("left_pose_topic").as_string();
     right_pose_topic_ = get_parameter("right_pose_topic").as_string();
     left_gripper_topic_ = get_parameter("left_gripper_topic").as_string();
@@ -50,7 +55,7 @@ class PolicyActionRelay final : public rclcpp::Node {
 
     action_subscription_ = create_subscription<Float32MultiArray>(
         input_topic_,
-        rclcpp::QoS(10).reliable(),
+        rclcpp::QoS(1).reliable(),
         std::bind(&PolicyActionRelay::onAction, this, std::placeholders::_1));
     left_pose_publisher_ = create_publisher<PoseStamped>(left_pose_topic_, rclcpp::QoS(10).reliable());
     right_pose_publisher_ =
@@ -109,9 +114,11 @@ class PolicyActionRelay final : public rclcpp::Node {
       const Matrix4d right_midpoint_from_ee =
           makeTransform(right_rotation, right_midpoint_position);
       const Matrix4d left_arm_from_ee =
-          left_midpoint_from_arm_base_.inverse() * left_midpoint_from_ee;
+          action_frame_ == "link0" ? left_midpoint_from_ee :
+          (left_midpoint_from_arm_base_.inverse() * left_midpoint_from_ee).eval();
       const Matrix4d right_arm_from_ee =
-          right_midpoint_from_arm_base_.inverse() * right_midpoint_from_ee;
+          action_frame_ == "link0" ? right_midpoint_from_ee :
+          (right_midpoint_from_arm_base_.inverse() * right_midpoint_from_ee).eval();
       if (!isHomogeneous(left_arm_from_ee) || !isHomogeneous(right_arm_from_ee) ||
           !isRotation(left_arm_from_ee.block<3, 3>(0, 0)) ||
           !isRotation(right_arm_from_ee.block<3, 3>(0, 0))) {
@@ -170,6 +177,7 @@ class PolicyActionRelay final : public rclcpp::Node {
   }
 
   std::string input_topic_;
+  std::string action_frame_;
   std::string left_pose_topic_;
   std::string right_pose_topic_;
   std::string left_gripper_topic_;

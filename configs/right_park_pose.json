@@ -1,0 +1,19 @@
+{
+ "schema": "franka_duo_park_pose_v1",
+ "frame": "midpoint base",
+ "arm": "right",
+ "xyz": [
+  0.4572,
+  -0.0327,
+  0.1313
+ ],
+ "rot6d": [
+  0.9611,
+  -0.2727,
+  -0.0444,
+  -0.2694,
+  -0.9606,
+  0.0678
+ ],
+ "captured_at_utc": "2026-09-06T19:09:23Z"
+}

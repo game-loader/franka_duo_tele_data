@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 
 #include <Eigen/Dense>
@@ -11,6 +12,7 @@
 #include <realtime_tools/realtime_buffer.hpp>
 
 #include "franka_semantic_components/franka_cartesian_pose_interface.hpp"
+#include "franka_duo_policy_control/velocity_servo.hpp"
 
 namespace franka_duo_policy_control {
 
@@ -37,23 +39,12 @@ class PolicyCartesianPoseController final : public controller_interface::Control
   struct TargetPose {
     Eigen::Vector3d position{Eigen::Vector3d::Zero()};
     Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
+    std::int64_t received_ns{0};
   };
 
-  static Eigen::Vector3d clampNorm(const Eigen::Vector3d& value, double limit);
   static Eigen::Vector3d orientationError(
       const Eigen::Quaterniond& current,
       const Eigen::Quaterniond& target);
-  static void updateServoState(
-      const Eigen::Vector3d& target,
-      double dt,
-      double kp,
-      double kd,
-      double max_velocity,
-      double max_acceleration,
-      double max_jerk,
-      Eigen::Vector3d& position,
-      Eigen::Vector3d& velocity,
-      Eigen::Vector3d& acceleration);
 
   void equilibriumPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr message);
 
@@ -64,6 +55,7 @@ class PolicyCartesianPoseController final : public controller_interface::Control
   std::string target_topic_;
   std::string expected_frame_id_;
   bool allow_motion_{false};
+  double target_timeout_s_{0.25};
   double linear_kp_{16.0};
   double linear_kd_{8.0};
   double linear_max_velocity_{0.15};
@@ -76,11 +68,9 @@ class PolicyCartesianPoseController final : public controller_interface::Control
   double angular_max_jerk_{50.0};
 
   Eigen::Vector3d position_d_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d linear_velocity_d_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d linear_acceleration_d_{Eigen::Vector3d::Zero()};
+  VelocityServo linear_servo_;
   Eigen::Quaterniond orientation_d_{Eigen::Quaterniond::Identity()};
-  Eigen::Vector3d angular_velocity_d_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d angular_acceleration_d_{Eigen::Vector3d::Zero()};
+  VelocityServo angular_servo_;
 
   realtime_tools::RealtimeBuffer<TargetPose> target_pose_buffer_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr target_subscription_;

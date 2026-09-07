@@ -13,6 +13,7 @@ from franka_duo_tele_data.mcap_to_lerobot import (
     LeRobotV3Writer,
     SyncStats,
     TimedBuffer,
+    _binary_gripper_state,
     compose_transform,
     invert_transform,
     load_usd_geometry,
@@ -76,7 +77,7 @@ def test_adaptive_voxel_sample_returns_xyz_only_fixed_size() -> None:
 
 def test_resize_rgb_is_256_square() -> None:
     image = np.zeros((10, 20, 3), dtype=np.uint8)
-    resized = resize_rgb(image)
+    resized = resize_rgb(image, (256, 256))
     assert resized.shape == (256, 256, 3)
 
 
@@ -96,6 +97,11 @@ def test_nearest_buffer_uses_receipt_for_headerless_message() -> None:
     buffer.append(value, 100)
     assert buffer.nearest(105, 5).message is value
     assert buffer.nearest(106, 5) is None
+
+
+def test_binary_gripper_state_has_no_intermediate_values() -> None:
+    assert _binary_gripper_state(0.8, closed_position=0.8, open_position=0.0, threshold=0.5) == 0.0
+    assert _binary_gripper_state(0.4, closed_position=0.8, open_position=0.0, threshold=0.5) == 1.0
 
 
 def test_fixed_rate_gate_keeps_source_frames_on_output_grid() -> None:
@@ -126,16 +132,15 @@ def test_offline_depth_decode_can_preserve_float32_precision() -> None:
 def test_writer_emits_video_metadata_for_v3_reader(tmp_path) -> None:
     pytest.importorskip("av")
     pytest.importorskip("pyarrow")
-    writer = LeRobotV3Writer(tmp_path, fps=15, task="test task", num_points=2, channels=3)
+    writer = LeRobotV3Writer(tmp_path, fps=30, task="test task")
     pose = np.zeros(18, dtype=np.float32)
     frame = DerivedFrame(
         source_stamp_ns=123,
-        source_skew_ns=np.zeros(9, dtype=np.int64),
+        source_skew_ns=np.zeros(4, dtype=np.int64),
         head_rgb=np.zeros((4, 4, 3), dtype=np.uint8),
         wrist_left_rgb=np.zeros((4, 4, 3), dtype=np.uint8),
         wrist_right_rgb=np.zeros((4, 4, 3), dtype=np.uint8),
-        point_cloud=np.zeros((2, 3), dtype=np.float32),
-        state=np.zeros(16, dtype=np.float32),
+        state=np.zeros(20, dtype=np.float32),
         ee_pose=pose,
         gripper=np.zeros(2, dtype=np.float32),
     )
@@ -144,22 +149,36 @@ def test_writer_emits_video_metadata_for_v3_reader(tmp_path) -> None:
     writer.finish_episode(0, "episode_000000", SyncStats(frames_written=1))
     writer.finalize()
     info = json.loads((tmp_path / "meta" / "info.json").read_text(encoding="utf-8"))
-    assert info["features"]["observation.ee_pose"]["shape"] == [18]
+    assert info["features"]["observation.state"]["shape"] == [20]
     assert info["features"]["action"]["shape"] == [20]
     assert info["features"]["action"]["names"][-2:] == [
-        "left_gripper_open_fraction",
-        "right_gripper_open_fraction",
+        "left_gripper_open",
+        "right_gripper_open",
     ]
-    assert info["features"]["observation.point_cloud"]["names"] == ["x", "y", "z"]
+    assert "observation.point_cloud" not in info["features"]
     video_info = info["features"]["observation.images.head"]["info"]
     assert video_info["video.height"] == 4
     assert video_info["video.width"] == 4
     assert video_info["video.channels"] == 3
-    assert video_info["video.fps"] == 15
+    assert video_info["video.fps"] == 30
     assert video_info["video.pix_fmt"] == "yuv420p"
     assert video_info["video.is_depth_map"] is False
+    assert {
+        key: info["features"][key]
+        for key in ("timestamp", "frame_index", "episode_index", "index", "task_index")
+    } == {
+        "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+        "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+        "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+        "index": {"dtype": "int64", "shape": [1], "names": None},
+        "task_index": {"dtype": "int64", "shape": [1], "names": None},
+    }
+    import pandas as pd
     import pyarrow.parquet as pq
 
+    tasks = pd.read_parquet(tmp_path / "meta" / "tasks.parquet")
+    assert tasks.index.tolist() == ["test task"]
+    assert tasks["task_index"].tolist() == [0]
     episodes = pq.read_table(tmp_path / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
     assert "meta/episodes/chunk_index" in episodes.column_names
     assert "meta/episodes/file_index" in episodes.column_names

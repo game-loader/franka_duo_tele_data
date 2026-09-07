@@ -1,0 +1,47 @@
+/left/controller_manager:
+  ros__parameters:
+    left_policy_cartesian_pose_controller:
+      type: franka_duo_policy_control/PolicyCartesianPoseController
+
+/right/controller_manager:
+  ros__parameters:
+    right_policy_cartesian_pose_controller:
+      type: franka_duo_policy_control/PolicyCartesianPoseController
+
+/left/left_policy_cartesian_pose_controller:
+  ros__parameters:
+    type: franka_duo_policy_control/PolicyCartesianPoseController
+    arm_prefix: left
+    target_topic: /franka_duo/policy/left/target_pose
+    expected_frame_id: left_fr3v2_link0
+    allow_motion: true
+    target_timeout_s: 0.25
+    linear_kp: 16.0
+    linear_kd: 8.0
+    linear_max_velocity: 0.05
+    linear_max_acceleration: 0.10
+    linear_max_jerk: 0.5
+    angular_kp: 16.0
+    angular_kd: 8.0
+    angular_max_velocity: 0.3
+    angular_max_acceleration: 0.5
+    angular_max_jerk: 2.0
+
+/right/right_policy_cartesian_pose_controller:
+  ros__parameters:
+    type: franka_duo_policy_control/PolicyCartesianPoseController
+    arm_prefix: right
+    target_topic: /franka_duo/policy/right/target_pose
+    expected_frame_id: right_fr3v2_link0
+    allow_motion: true
+    target_timeout_s: 0.25
+    linear_kp: 16.0
+    linear_kd: 8.0
+    linear_max_velocity: 0.05
+    linear_max_acceleration: 0.10
+    linear_max_jerk: 0.5
+    angular_kp: 16.0
+    angular_kd: 8.0
+    angular_max_velocity: 0.3
+    angular_max_acceleration: 0.5
+    angular_max_jerk: 2.0

@@ -1,0 +1,25 @@
+# Uses the dataset manifest for source dimensions, geometry and binary grippers.
+mcap_config: tmr_mcap.yaml
+topics:
+  head: /head_camera/zed/rgb/color/rect/image
+  wrist_left: /wrist_camera_left/color/image_raw
+  wrist_right: /wrist_camera_right/color/image_raw
+  left_pose: /left/franka_robot_state_broadcaster/current_pose
+  right_pose: /right/franka_robot_state_broadcaster/current_pose
+  left_gripper: /left/gripper/joint_states
+  right_gripper: /right/gripper/joint_states
+command_topic: /franka_duo/rgb20d/action
+trace_topic: /franka_duo/eval/rgb20d_trace
+max_input_age_ms: 200
+max_start_distance_m: 0.03
+max_start_rotation_rad: 0.2
+max_tracking_distance_m: 0.06
+max_tracking_rotation_rad: 0.4
+max_target_step_m: 0.04
+max_target_step_rad: 0.35
+# Shared midpoint frame, meters; checked before converting to link0.
+workspace_min: [0.25, -0.30, -0.27]
+workspace_max: [0.56, 0.50, 0.35]
+# Joint-servo path (site/franka_duo_joint_servo): absolute-step chunks and servo status.
+joint_servo_chunk_topic: /franka_duo/joint_servo/action_chunk
+joint_servo_status_topic: /franka_duo/joint_servo/status
