@@ -8,12 +8,12 @@
 namespace franka_duo_policy_control {
 namespace {
 
-TEST(ActionMath, ConvertsRowRot6dToProperRotation) {
-  const auto rotation = rot6dRowsToMatrix({0.0, 2.0, 0.0, -3.0, 0.0, 0.0});
+TEST(ActionMath, ConvertsColumnRot6dToProperRotation) {
+  const auto rotation = rot6dColumnsToMatrix({0.0, 2.0, 0.0, -3.0, 0.0, 0.0});
 
   EXPECT_TRUE(isRotation(rotation));
-  EXPECT_NEAR(rotation(0, 1), 1.0, 1e-9);
-  EXPECT_NEAR(rotation(1, 0), -1.0, 1e-9);
+  EXPECT_NEAR(rotation(0, 1), -1.0, 1e-9);
+  EXPECT_NEAR(rotation(1, 0), 1.0, 1e-9);
   EXPECT_NEAR(rotation(2, 2), 1.0, 1e-9);
 }
 

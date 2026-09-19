@@ -11,7 +11,7 @@ Cartesian pose controller，不修改现场已有驱动、controller 配置或�
         |
         v
 policy_action_relay
-  20D 解包、rot6d_rows、有限值检查
+  20D 解包、rot6d_columns、有限值检查
   训练时 midpoint frame -> 左右各自 arm-base frame
   gripper open fraction [0,1] -> target_gripper_width_percent [0,1]
         |
@@ -31,8 +31,8 @@ policy_action_relay
 模型 action 的布局必须保持仓库的 20D contract：
 
 ```text
-[0:9]   left xyz + rot6d_rows
-[9:18]  right xyz + rot6d_rows
+[0:9]   left xyz + rot6d_columns
+[9:18]  right xyz + rot6d_columns
 [18]    left gripper open fraction
 [19]    right gripper open fraction
 ```

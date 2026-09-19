@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>labs_fr3_kinematics</name><version>0.1.0</version>
+  <description>Offline FR3 link8 FK/IK using the MoveIt KDL plugin.</description>
+  <maintainer email="maintainers@example.invalid">Franka Duo maintainers</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>moveit_core</depend><depend>moveit_ros_planning</depend>
+  <exec_depend>moveit_kinematics</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

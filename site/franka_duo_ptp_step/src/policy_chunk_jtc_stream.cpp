@@ -62,19 +62,19 @@ Eigen::Matrix3d rotationFromRot6d(const double* values) {
   Eigen::Vector3d first(values[0], values[1], values[2]);
   Eigen::Vector3d second(values[3], values[4], values[5]);
   if (!first.allFinite() || !second.allFinite() || first.norm() < 1e-8) {
-    throw std::invalid_argument("rot6d contains a degenerate first row");
+    throw std::invalid_argument("rot6d contains a degenerate first column");
   }
   first.normalize();
   second -= first.dot(second) * first;
   if (second.norm() < 1e-8) {
-    throw std::invalid_argument("rot6d rows are collinear");
+    throw std::invalid_argument("rot6d columns are collinear");
   }
   second.normalize();
   const Eigen::Vector3d third = first.cross(second).normalized();
   Eigen::Matrix3d rotation;
-  rotation.row(0) = first.transpose();
-  rotation.row(1) = second.transpose();
-  rotation.row(2) = third.transpose();
+  rotation.col(0) = first;
+  rotation.col(1) = second;
+  rotation.col(2) = third;
   if (!rotation.allFinite() ||
       (rotation * rotation.transpose() - Eigen::Matrix3d::Identity()).norm() > 1e-6 ||
       std::abs(rotation.determinant() - 1.0) > 1e-6) {

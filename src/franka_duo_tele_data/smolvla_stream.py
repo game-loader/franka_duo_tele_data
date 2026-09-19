@@ -41,7 +41,22 @@ def encode_images(images, image_format: str) -> dict[str, bytes]:
     return encoded
 
 
-def run(args) -> int:
+def prepare_absolute_chunk(result, contract, state, args, config):
+    raw = np.asarray(result["actions"], dtype=np.float32)
+    if raw.shape != (args.horizon, 20):
+        raise ValueError(f"expected [{args.horizon},20] actions, received {raw.shape}")
+    return sanitize_chunk(
+        raw,
+        contract,
+        state,
+        max_step_m=config["max_target_step_m"],
+        max_step_rad=config["max_target_step_rad"],
+        first_offset_m=args.max_first_offset_m,
+        first_offset_rad=args.max_first_offset_rad,
+    )
+
+
+def run(args, *, client_type=SmolVLAClient, prepare_chunk=prepare_absolute_chunk, sequential=False) -> int:
     import rclpy
     from geometry_msgs.msg import PoseStamped
     from rclpy.qos import qos_profile_sensor_data
@@ -173,9 +188,12 @@ def run(args) -> int:
                 "event": "configuration",
                 "action_hz": action_hz,
                 "playback_speed": args.speed,
-                "request_lead_ms": args.request_lead_ms,
+                "execution_mode": "chunk_then_infer" if sequential else "overlap",
+                "request_lead_ms": None if sequential else args.request_lead_ms,
                 "image_format": args.image_format,
                 "published": args.publish,
+                "action_representation": getattr(client_type, "action_representation", "absolute20"),
+                "task": args.task,
             }
         )
 
@@ -183,18 +201,43 @@ def run(args) -> int:
             sent = 0
             final_end = None
             started = time.monotonic()
-            async with SmolVLAClient(args.url, timeout=args.timeout) as client:
+            async with client_type(args.url, timeout=args.timeout) as client:
                 while sent < args.max_chunks and (
                     args.duration_s == 0 or time.monotonic() - started < args.duration_s
                 ):
                     current = status()
                     if publisher is not None and current is None:
                         raise TimeoutError("joint servo status lost")
-                    remaining = remaining_ms(current)
-                    if publisher is not None and remaining is not None and remaining > args.request_lead_ms:
-                        await asyncio.sleep(0.01)
-                        continue
-                    observation = reader.next(timeout_s=3)
+                    if publisher is not None and sequential:
+                        deadline = time.monotonic() + 20 + args.horizon / action_hz * 1.5
+                        while not (
+                            current.holding
+                            and (final_end is None or (
+                                current.step >= final_end and current.last_step == final_end
+                            ))
+                        ):
+                            if time.monotonic() > deadline:
+                                raise TimeoutError("servo did not finish the accepted chunk before inference")
+                            await asyncio.sleep(0.01)
+                            current = status()
+                            if current is None:
+                                raise TimeoutError("joint servo status lost while waiting for chunk completion")
+                        # Require an image captured after the hold was observed,
+                        # rather than a delayed image from the preceding motion.
+                        observation_not_before_ns = time.time_ns()
+                        deadline = time.monotonic() + 3
+                        while True:
+                            observation = reader.next(timeout_s=max(0.001, deadline - time.monotonic()))
+                            if observation.stamp_ns >= observation_not_before_ns:
+                                break
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError("no observation captured after chunk completion")
+                    else:
+                        remaining = remaining_ms(current)
+                        if publisher is not None and remaining is not None and remaining > args.request_lead_ms:
+                            await asyncio.sleep(0.01)
+                            continue
+                        observation = reader.next(timeout_s=3)
                     state = observation.state
                     encode_start = time.perf_counter()
                     images = encode_images(observation.images, args.image_format)
@@ -204,7 +247,7 @@ def run(args) -> int:
                     if not -0.05 <= source_age_s <= 1.0:
                         raise TimeoutError("observation timestamp is stale or camera/robot clocks differ")
                     start_step = 0
-                    if requested is not None and requested.started:
+                    if not sequential and requested is not None and requested.started:
                         observation_step = requested.step - max(0.0, source_age_s) * action_hz
                         start_step = max(0, math.floor(observation_step) + 1)
                     request_remaining = remaining_ms(requested)
@@ -217,7 +260,7 @@ def run(args) -> int:
                             if request_remaining is None
                             else round(request_remaining, 1),
                             "observation_age_ms": round(source_age_s * 1000, 1),
-                            "start_step": start_step,
+                            "start_step": None if sequential else start_step,
                             "image_bytes": sum(map(len, images.values())),
                             "encode_ms": round(encode_ms, 1),
                             "source_stamps_ns": observation.source_stamps_ns,
@@ -226,9 +269,6 @@ def run(args) -> int:
                     t0 = time.perf_counter()
                     result = await client.infer(state.tolist(), images, args.task)
                     round_trip_ms = (time.perf_counter() - t0) * 1000
-                    raw = np.asarray(result["actions"], dtype=np.float32)
-                    if raw.shape != (args.horizon, 20):
-                        raise ValueError(f"expected [{args.horizon},20] actions, received {raw.shape}")
                     # Persist the raw result before any motion validation can reject it.
                     record(
                         {
@@ -238,19 +278,22 @@ def run(args) -> int:
                             "inference_ms": result.get("inference_ms"),
                             "round_trip_ms": round(round_trip_ms, 1),
                             "state": state.tolist(),
-                            "raw_actions": raw.tolist(),
+                            "raw_actions": result["actions"],
+                            "action_representation": result.get("action_representation"),
+                            "normalized": result.get("normalized"),
                         }
                     )
-                    actions, stats = sanitize_chunk(
-                        raw,
-                        contract,
-                        state,
-                        max_step_m=config["max_target_step_m"],
-                        max_step_rad=config["max_target_step_rad"],
-                        first_offset_m=args.max_first_offset_m,
-                        first_offset_rad=args.max_first_offset_rad,
-                    )
+                    actions, stats = prepare_chunk(result, contract, state, args, config)
                     current = status()
+                    if publisher is not None and sequential:
+                        if current is None or not current.holding:
+                            raise RuntimeError("servo left hold during inference")
+                        # The servo clock advances while inference runs. Start
+                        # all 32 rows in the future, allowing transport and IK
+                        # time; never discard a prefix because inference was slow.
+                        start_step = (
+                            math.ceil(current.step) + math.ceil(action_hz) if current.started else 0
+                        )
                     end_step = start_step + len(actions) - 1
                     if publisher is not None:
                         if current is None:
@@ -297,6 +340,8 @@ def run(args) -> int:
                         if current is not None and current.chunks > before_chunks:
                             if current.chunks != before_chunks + 1 or current.last_step != end_step:
                                 raise RuntimeError("unexpected servo chunk acknowledgement")
+                            if sequential and current.last_chunk_start_step != start_step:
+                                raise RuntimeError("servo skipped rows in sequential chunk; stopping requests")
                             break
                         if time.monotonic() > ack_deadline:
                             raise TimeoutError("servo did not accept the chunk; inspect its IK/velocity log")
@@ -346,6 +391,9 @@ def run(args) -> int:
     except KeyboardInterrupt:
         record({"event": "stopped_by_user", "note": "accepted plan finishes; servo and relay keep holding"})
         return 130
+    except Exception as exc:
+        record({"event": "error", "error": str(exc)})
+        raise
     finally:
         log.close()
         if rclpy.ok():
@@ -354,8 +402,8 @@ def run(args) -> int:
         node.destroy_node()
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def build_parser(description=__doc__) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=Path("configs/tmr_rgb20d.yaml"))
     parser.add_argument("--url", default="ws://100.86.181.61:8081/infer")
@@ -372,6 +420,10 @@ def main(argv=None) -> int:
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--enable-robot", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("outputs/smolvla_stream.jsonl"))
+    return parser
+
+
+def parse_stream_args(parser, argv=None):
     args = parser.parse_args(argv)
     if (
         not math.isfinite(args.speed)
@@ -386,6 +438,21 @@ def main(argv=None) -> int:
         or args.duration_s < 0
     ):
         parser.error("speed in (0,1], max-chunks >= 1, horizon=32, positive timeouts, duration >= 0")
+    if args.publish != args.enable_robot:
+        parser.error("robot publication requires both --publish and --enable-robot")
+    if any(
+        not math.isfinite(value) or value <= 0
+        for value in (
+            args.max_first_offset_m,
+            args.max_first_offset_rad,
+        )
+    ):
+        parser.error("first-offset limits must be finite and positive")
+    return args
+
+
+def main(argv=None) -> int:
+    args = parse_stream_args(build_parser(), argv)
     return run(args)
 
 

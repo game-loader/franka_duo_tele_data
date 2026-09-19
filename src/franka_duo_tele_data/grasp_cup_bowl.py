@@ -47,10 +47,7 @@ ARM_SLICE = {"left": slice(0, 9), "right": slice(9, 18)}
 GRIPPER_INDEX = {"left": 18, "right": 19}
 # Right-arm EE orientation from dataset episode 0 frame 178 (cup grasp) and left
 # frame 186 (bowl grasp); both were executed under the impedance controller.
-DATASET_GRASP_ROT6D = {
-    "right": (0.9724, -0.1398, -0.1868, -0.1723, -0.9701, -0.1708),
-    "left": (0.9766, 0.1708, -0.1310, 0.1827, -0.9795, 0.0845),
-}
+DATASET_GRASP_ROT6D = {'right': (0.9723999805520005, -0.17228539497050505, -0.15734046047449451, -0.13979999720400008, -0.9701250125931667, 0.19827612242241782), 'left': (0.9765603524545192, 0.18265011080367557, -0.11388070528983527, 0.17079306594228127, -0.9795391780358541, -0.10645528318913558)}
 
 
 # --------------------------------------------------------------------------- perception (ROS-free)

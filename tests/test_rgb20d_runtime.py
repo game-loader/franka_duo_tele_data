@@ -52,7 +52,7 @@ def contract(tmp_path):
                     "T_newbase_from_left_arm_base": left.tolist(),
                     "T_newbase_from_right_arm_base": right.tolist(),
                 },
-                "action_spec": {"dimension": 20, "ee_dimension": 9, "ee_rotation": "rot6d_rows"},
+                "action_spec": {"dimension": 20, "ee_dimension": 9, "ee_rotation": "rot6d_columns"},
                 "gripper_calibration": {
                     "closed_position": 0.8,
                     "open_position": 0,
@@ -222,6 +222,51 @@ def test_improper_geometry_fails_before_live_input(contract):
     path.write_text(json.dumps(document))
     with pytest.raises(ValueError, match="right handed"):
         RGB20DContract(contract.root)
+
+
+@pytest.mark.parametrize("short_history", [False, True])
+@pytest.mark.parametrize("camera_arrival_age_ms", [0, 70])
+def test_delayed_camera_keeps_matching_1khz_state(
+    contract, monkeypatch, short_history, camera_arrival_age_ms
+):
+    """120 state samples lose the anchor before the delayed image is ready."""
+    clock = {"now": 10_000_000_000}
+    monkeypatch.setattr(time, "monotonic_ns", lambda: clock["now"])
+    monkeypatch.setattr(time, "time_ns", lambda: clock["now"])
+    cache = RGB20DCache(state_history_size=120) if short_history else RGB20DCache()
+    end = clock["now"]
+    anchor = end - 180_000_000
+
+    def header(stamp):
+        return SimpleNamespace(stamp=SimpleNamespace(sec=stamp // 10**9, nanosec=stamp % 10**9))
+
+    # A frame captured 180 ms ago needs no additional wait after delivery.
+    clock["now"] = end - camera_arrival_age_ms * 1_000_000
+    for key in CAMERAS:
+        cache.store_image(key, SimpleNamespace(
+            header=header(anchor), width=6, height=4, encoding="rgb8", step=18,
+            is_bigendian=False, data=np.zeros((4, 6, 3), dtype=np.uint8).tobytes(),
+        ))
+    # Emulate direct 1 kHz poses and grippers, with distinct poses each tick.
+    for tick in range(301):
+        clock["now"] = end - (300 - tick) * 1_000_000
+        for side in ("left", "right"):
+            message = pose()
+            message.pose.position.x += tick * 0.0001
+            message.header = header(clock["now"])
+            getattr(cache, f"store_{side}_pose")(message)
+            getattr(cache, f"store_{side}_gripper_states")(SimpleNamespace(position=[0.8]))
+    reader = RGB20DReader(cache, contract)
+    if short_history:
+        with pytest.raises(TimeoutError, match="synchronized"):
+            reader.next(timeout_s=0.01)
+        return
+    observation = reader.next(timeout_s=0.1)
+    assert observation.stamp_ns == anchor
+    assert all(stamp == anchor for stamp in observation.source_stamps_ns.values())
+    link0 = contract.action_spec.to_link0_action(observation.state)
+    np.testing.assert_allclose(link0[[0, 9]], 0.412, atol=1e-6)
+    assert cache.images["head"].maxlen == 30
 
 
 def test_live_inference_does_not_require_recorder_config_or_rosbag():

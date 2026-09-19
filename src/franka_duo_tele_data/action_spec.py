@@ -7,7 +7,7 @@ in a small dependency-free module makes it possible to validate an export
 before ROS is started.
 
 The DP3 policy emits a 20D dual-arm Cartesian target (9 values per
-end-effector: XYZ + the first two rows of a rotation matrix, followed by
+end-effector: XYZ + the first two columns of a rotation matrix, followed by
 one normalized gripper value per arm).
 """
 
@@ -22,7 +22,7 @@ import numpy as np
 
 ACTION_DIM = 20
 EE_DIM = 9
-EE_ROTATION_REPRESENTATION = "rot6d_rows"
+EE_ROTATION_REPRESENTATION = "rot6d_columns"
 
 
 def _as_vector(value: Sequence[float] | np.ndarray, size: int, name: str) -> np.ndarray:
@@ -44,7 +44,7 @@ def _flatten_transform(value: Any, name: str) -> tuple[float, ...]:
 
 
 def rot6d_to_matrix(rotation6d: Sequence[float] | np.ndarray) -> np.ndarray:
-    """Convert RL-100's first-two-rows 6D rotation representation to a matrix."""
+    """Convert RL-100's first-two-columns 6D rotation representation to a matrix."""
 
     value = np.asarray(rotation6d, dtype=np.float64)
     if value.shape[-1] != 6:
@@ -61,16 +61,16 @@ def rot6d_to_matrix(rotation6d: Sequence[float] | np.ndarray) -> np.ndarray:
         raise ValueError("rotation6d vectors are collinear")
     basis2 = second_orthogonal / second_norm
     basis3 = np.cross(basis1, basis2, axis=-1)
-    return np.stack((basis1, basis2, basis3), axis=-2).astype(np.float32)
+    return np.stack((basis1, basis2, basis3), axis=-1).astype(np.float32)
 
 
 def matrix_to_rot6d(matrix: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
-    """Flatten the first two matrix rows, matching RL-100 ``mat_to_rot6d``."""
+    """Flatten the first two matrix columns, in column order: R00,R10,R20,R01,R11,R21."""
 
     value = np.asarray(matrix, dtype=np.float32)
     if value.shape[-2:] != (3, 3):
         raise ValueError(f"rotation matrix must end in (3, 3), got {value.shape}")
-    return np.ascontiguousarray(value[..., :2, :].reshape(value.shape[:-2] + (6,)))
+    return np.ascontiguousarray(np.swapaxes(value[..., :, :2], -1, -2).reshape(value.shape[:-2] + (6,)))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -257,7 +257,7 @@ def action_spec_manifest(spec: FrankaDuoActionSpec = DEFAULT_ACTION_SPEC) -> dic
             "left_gripper": 18,
             "right_gripper": 19,
         },
-        "ee_format": "xyz + continuous rot6d (first two rotation-matrix rows flattened row-major)",
+        "ee_format": "xyz + continuous rot6d (first two rotation-matrix columns flattened column-major)",
         "gripper_range": list(spec.gripper_range),
         "workspace_min": list(spec.workspace_min) if spec.workspace_min is not None else None,
         "workspace_max": list(spec.workspace_max) if spec.workspace_max is not None else None,

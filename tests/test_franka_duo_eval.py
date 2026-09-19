@@ -78,7 +78,7 @@ def _camera_info(width: int, height: int, stamp_ns: int) -> SimpleNamespace:
     )
 
 
-def test_rot6d_contract_matches_rl100_rows():
+def test_rot6d_contract_uses_columns():
     matrix = np.eye(3, dtype=np.float32)
     six = matrix_to_rot6d(matrix)
     assert six.tolist() == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
@@ -204,7 +204,7 @@ def _native_manifest() -> dict:
         "action_spec": {
             "dimension": 20,
             "ee_dimension": 9,
-            "ee_rotation": "rot6d_rows",
+            "ee_rotation": "rot6d_columns",
             "gripper_range": [0.0, 1.0],
         },
         "pointcloud": {

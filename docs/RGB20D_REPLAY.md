@@ -12,7 +12,7 @@ entry point. Camera and robot drivers stay host-managed.
 - `observation.images.camera1`: head, uint8 RGB HWC, original size.
 - `observation.images.camera2`: left wrist, uint8 RGB HWC, original size.
 - `observation.images.camera3`: right wrist, uint8 RGB HWC, original size.
-- `observation.state`: float32[20], left xyz + rot6d rows, right xyz + rot6d rows,
+- `observation.state`: float32[20], left xyz + rot6d columns, right xyz + rot6d columns,
   left/right binary grippers (0 closed, 1 open).
 
 The source dimensions, gripper calibration and arm mounting transforms come

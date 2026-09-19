@@ -424,7 +424,7 @@ def _action_record(
         "schema": "franka_duo_eval_action_v1",
         "stamp_ns": int(observation.stamp_ns),
         "source_stamps_ns": observation.source_stamps_ns,
-        "action_layout": "left_xyz_rot6d_rows,right_xyz_rot6d_rows,left_gripper,right_gripper",
+        "action_layout": "left_xyz_rot6d_columns,right_xyz_rot6d_columns,left_gripper,right_gripper",
         "action_frame": action_frame,
         "action": [float(value) for value in action],
     }
@@ -447,7 +447,7 @@ def _action_chunk_record(
         "schema": "franka_duo_eval_action_chunk_v1",
         "stamp_ns": int(observation.stamp_ns),
         "source_stamps_ns": observation.source_stamps_ns,
-        "action_layout": "left_xyz_rot6d_rows,right_xyz_rot6d_rows,left_gripper,right_gripper",
+        "action_layout": "left_xyz_rot6d_columns,right_xyz_rot6d_columns,left_gripper,right_gripper",
         "action_frame": action_frame,
         "horizon": int(actions.shape[0]),
         "execute_steps": int(execute_steps),

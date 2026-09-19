@@ -1,27 +1,27 @@
 {
   "description": "PTP home: original left home pose, right measured EE pose saved at user request.",
   "pose_frame": "midpoint base",
-  "pose_format": "18D: left xyz+rot6d_rows, right xyz+rot6d_rows",
+  "pose_format": "18D: left xyz+rot6d_columns, right xyz+rot6d_columns",
   "actions": [
     [
       0.2864091396331787,
       0.19298163056373596,
       -0.07760528475046158,
       0.9224472641944885,
-      -0.0007379500311799347,
-      -0.38612231612205505,
       0.06813792139291763,
-      -0.983993649482727,
-      0.16466225683689117,
+      -0.3800634443759918,
+      -0.0007379500311799347,
+      -0.9839937090873718,
+      -0.178201824426651,
       0.39992639422416687,
       -0.16309602558612823,
       -0.10916691273450851,
       0.9320077896118164,
-      0.15144094824790955,
-      -0.3292827308177948,
       0.12990984320640564,
+      -0.3383561968803406,
+      0.15144094824790955,
       -0.987739086151123,
-      -0.08657350391149521
+      0.037910111248493195
     ]
   ],
   "grippers": [
@@ -308,5 +308,6 @@
     ],
     "transform_convention": "p_A = T_A_from_B @ p_B; T_A_from_C = T_A_from_B @ T_B_from_C",
     "zed_external_calibration": "nominal USD head_camera_mounting_point plus ROS optical convention; override with --mount-to-optical"
-  }
+  },
+  "rotation_representation": "rot6d_columns"
 }

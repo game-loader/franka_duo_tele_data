@@ -1,20 +1,21 @@
 {
- "schema": "franka_duo_park_pose_v1",
- "name": "left_clear_of_camera",
- "frame": "midpoint base",
- "arm": "left",
- "xyz": [
-  0.4461,
-  0.3699,
-  -0.0525
- ],
- "rot6d": [
-  0.6293,
-  0.767,
-  0.1252,
-  0.7615,
-  -0.6408,
-  0.0977
- ],
- "captured_at_utc": "2026-09-06T20:08:25Z"
+  "schema": "franka_duo_park_pose_v1",
+  "name": "left_clear_of_camera",
+  "frame": "midpoint base",
+  "arm": "left",
+  "xyz": [
+    0.4461,
+    0.3699,
+    -0.0525
+  ],
+  "rot6d": [
+    0.6293054819107056,
+    0.7615113258361816,
+    0.15516136586666107,
+    0.7670066952705383,
+    -0.640745222568512,
+    0.033856604248285294
+  ],
+  "captured_at_utc": "2026-09-06T20:08:25Z",
+  "rotation_representation": "rot6d_columns"
 }

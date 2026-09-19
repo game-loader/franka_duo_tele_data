@@ -1,0 +1,20 @@
+{
+  "left": {
+    "samples": 30,
+    "success": 30,
+    "failures": [],
+    "max_position_error_m": 9.896753158573164e-08,
+    "max_rotation_error_rad": 1.8983198656526487e-07,
+    "max_joint_delta_rad": 0.012368039211188897,
+    "seed_perturbation_rad": 0.01
+  },
+  "right": {
+    "samples": 30,
+    "success": 30,
+    "failures": [],
+    "max_position_error_m": 7.654356633773054e-08,
+    "max_rotation_error_rad": 1.88676058625424e-07,
+    "max_joint_delta_rad": 0.01588415507837082,
+    "seed_perturbation_rad": 0.01
+  }
+}

@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 class SmolVLAClient:
+    subprotocol = "smolvla.msgpack.v1"
+
     def __init__(self, url="ws://127.0.0.1:8081/infer", timeout=60):
         self.url = url
         self.timeout = timeout
@@ -23,7 +25,7 @@ class SmolVLAClient:
         try:
             self.ws = await self.session.ws_connect(
                 self.url,
-                protocols=("smolvla.msgpack.v1",),
+                protocols=(self.subprotocol,),
                 heartbeat=20,
                 compress=0,
                 max_msg_size=16 * 1024 * 1024,
@@ -54,9 +56,12 @@ class SmolVLAClient:
             request_id = str(time.time_ns())
             payload = {"state": state, "images": images, "task": task, "request_id": request_id}
             try:
-                async with asyncio.timeout(self.timeout):
+                async def exchange():
                     await self.ws.send_bytes(msgpack.packb(payload, use_bin_type=True, use_single_float=True))
-                    message = await self.ws.receive()
+                    return await self.ws.receive()
+
+                # Humble's host-managed rclpy uses Python 3.10 (no asyncio.timeout).
+                message = await asyncio.wait_for(exchange(), timeout=self.timeout)
                 if message.type != WSMsgType.BINARY:
                     raise RuntimeError(f"WebSocket closed or returned an unexpected frame: {message.type}")
                 result = msgpack.unpackb(message.data, raw=False)

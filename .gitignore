@@ -25,6 +25,7 @@ datasets/
 outputs/
 bundles/
 checkpoints/
+remote_backups/
 *.log
 *.jsonl
 .hf-datasets-cache/

@@ -119,9 +119,8 @@ class WallServoController(Node):
         for i, distance in enumerate(scan.ranges):
             angle = scan.angle_min + i * scan.angle_increment
             # 限制在前方±30度（±0.52 rad）
-            if abs(angle) <= 0.52 and math.isfinite(distance):
-                if scan.range_min <= distance <= scan.range_max:
-                    front_distances.append(distance)
+            if abs(angle) <= 0.52 and math.isfinite(distance) and scan.range_min <= distance <= scan.range_max:
+                front_distances.append(distance)
 
         if not front_distances:
             return None

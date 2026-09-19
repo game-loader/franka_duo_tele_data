@@ -313,7 +313,7 @@ def _pose_to_transform(message: Any) -> np.ndarray:
 
 
 def _pose_vector_in_base(message: Any, base_from_link0: np.ndarray | None) -> np.ndarray:
-    """Return one EE pose as ``xyz + first-two-rotation-matrix rows`` (9D)."""
+    """Return one EE pose as ``xyz + first-two-rotation-matrix columns`` (9D)."""
     transform = _pose_to_transform(message)
     if base_from_link0 is not None:
         transform = np.asarray(base_from_link0, dtype=np.float32).reshape(4, 4) @ transform
@@ -551,7 +551,7 @@ class SynchronizedObservationReader:
             right_pose = _pose_vector_in_base(selected["right_pose"].message, self.base_from_right_link0)
             # DP3's training contract (see dataset meta/info.json) is:
             # 14 arm joints, 2 normalized gripper openings, then the 18D
-            # dual-arm EE pose (XYZ + continuous 6D rotation rows).  Keep
+            # dual-arm EE pose (XYZ + continuous 6D rotation columns).  Keep
             # this order byte-for-byte aligned with the checkpoint input.
             state = np.concatenate((basic_state[:14], basic_state[14:16], left_pose, right_pose)).astype(
                 np.float32

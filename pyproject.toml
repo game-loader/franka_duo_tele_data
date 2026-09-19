@@ -33,9 +33,29 @@ franka-duo-eval = "franka_duo_tele_data.eval_franka_duo:main"
 franka-duo-export-bundle = "franka_duo_tele_data.export_rl100_eval_bundle:main"
 franka-duo-export-lerobot-bundle = "franka_duo_tele_data.export_lerobot_eval_bundle:main"
 franka-duo-mcap-to-lerobot = "franka_duo_tele_data.mcap_to_lerobot:main"
+franka-duo-labs-to-lerobot = "franka_duo_tele_data.labs_mcap_to_lerobot:main"
+franka-duo-validate-labs = "franka_duo_tele_data.validate_labs_dataset:main"
+franka-duo-labs-action-delta = "franka_duo_tele_data.labs_action_delta:main"
+franka-duo-labs-client = "franka_duo_tele_data.labs_client:main"
+franka-duo-labs-relay = "franka_duo_tele_data.labs_relay:main"
 franka-duo-rgb20d-replay = "franka_duo_tele_data.replay_rgb20d:main"
 
 [project.optional-dependencies]
+inference-client = [
+    "aiohttp>=3.10,<4",
+    "msgpack>=1.0,<2",
+    "Pillow>=10,<13",
+    "scipy>=1.11,<2",
+]
+labs-client = [
+    "ruckig==0.12.2",
+    "aiohttp>=3.10,<4",
+    "msgpack>=1.0,<2",
+    "Pillow>=10,<13",
+    "scipy>=1.11,<2",
+    "av>=12.0.0,<18.0.0",
+    "pyarrow>=14.0.0,<24.0.0",
+]
 # ROS 2 Python messages come from the sourced robot-host installation, not PyPI.
 record = []
 eval = [
@@ -46,8 +66,10 @@ lerobot-policy = [
     "lerobot[dp3] @ https://github.com/game-loader/lerobot_droid/archive/0bab8685280cf53f40f1a4a03b6ff213d7ab8b94.tar.gz ; python_version >= '3.12'",
 ]
 postprocess = [
+    "scipy>=1.11,<2",
     "av>=12.0.0,<18.0.0",
     "mcap>=1.4.0,<2.0.0",
+    "mcap-ros2-support>=0.5.0,<1.0.0",
     "pandas>=2.0.0,<3.0.0",
     "pyarrow>=14.0.0,<24.0.0",
     "rosbags>=0.10.9,<0.11.0",

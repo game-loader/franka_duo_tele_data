@@ -97,8 +97,8 @@ class PolicyActionRelay final : public rclcpp::Node {
         left_rot6d[index] = static_cast<double>(message->data[3U + index]);
         right_rot6d[index] = static_cast<double>(message->data[12U + index]);
       }
-      const Matrix3d left_rotation = rot6dRowsToMatrix(left_rot6d);
-      const Matrix3d right_rotation = rot6dRowsToMatrix(right_rot6d);
+      const Matrix3d left_rotation = rot6dColumnsToMatrix(left_rot6d);
+      const Matrix3d right_rotation = rot6dColumnsToMatrix(right_rot6d);
       const Eigen::Vector3d left_midpoint_position(
           message->data[0], message->data[1], message->data[2]);
       const Eigen::Vector3d right_midpoint_position(

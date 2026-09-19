@@ -1,0 +1,1 @@
+<robot name="fr3"><group name="right_arm"><chain base_link="right_fr3_link0" tip_link="right_fr3_link8"/></group></robot>

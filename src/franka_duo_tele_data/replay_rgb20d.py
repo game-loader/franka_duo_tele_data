@@ -489,7 +489,7 @@ def run_joint_servo(args, contract: RGB20DContract) -> None:
             node.destroy_node()
 
 
-def optional_recorder(args, config):
+def optional_recorder(args, config, *, dataset_name="franka_duo_rgb20d_replay"):
     if not args.record_mcap:
         return None
     from .mcap_recorder import RawMcapRecorder, load_config as load_mcap_config, preflight_ros2
@@ -502,7 +502,7 @@ def optional_recorder(args, config):
         raise ValueError("all live inputs must be part of the raw MCAP contract")
     raw = dataclasses.replace(
         raw,
-        dataset_name="franka_duo_rgb20d_replay",
+        dataset_name=dataset_name,
         max_episodes=1,
         topics=tuple(dict.fromkeys((*raw.topics, config["trace_topic"]))),
     )

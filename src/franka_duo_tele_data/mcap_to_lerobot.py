@@ -168,7 +168,7 @@ def pose_to_transform(pose: Any) -> np.ndarray:
 
 
 def pose_vector(transform: np.ndarray) -> np.ndarray:
-    """Flatten one pose as ``xyz + RL100 row-based 6D rotation`` (9 values)."""
+    """Flatten one pose as ``xyz + RL100 column-based 6D rotation`` (9 values)."""
 
     value = np.asarray(transform, dtype=np.float32)
     if value.shape != (4, 4):
@@ -641,6 +641,41 @@ class _StatsAccumulator:
         }
 
 
+class ImageStatsAccumulator:
+    """Per-channel pixel statistics; count denotes sampled images, not pixels."""
+
+    def __init__(self):
+        self.minimum = np.full(3, np.inf)
+        self.maximum = np.full(3, -np.inf)
+        self.total = np.zeros(3)
+        self.square = np.zeros(3)
+        self.pixels = 0
+        self.count = 0
+
+    def update(self, rgb):
+        # Deterministic spatial subsampling, including variance within images.
+        pixels = np.asarray(rgb)[::8, ::8].reshape(-1, 3).astype(np.float64) / 255.0
+        self.minimum = np.minimum(self.minimum, pixels.min(axis=0))
+        self.maximum = np.maximum(self.maximum, pixels.max(axis=0))
+        self.total += pixels.sum(axis=0)
+        self.square += np.square(pixels).sum(axis=0)
+        self.pixels += len(pixels)
+        self.count += 1
+
+    def finish(self):
+        if not self.pixels:
+            raise ValueError("No image samples for statistics")
+        mean = self.total / self.pixels
+        std = np.sqrt(np.maximum(self.square / self.pixels - mean * mean, 0))
+        return {
+            "min": self.minimum.reshape(3, 1, 1).tolist(),
+            "max": self.maximum.reshape(3, 1, 1).tolist(),
+            "mean": mean.reshape(3, 1, 1).tolist(),
+            "std": std.reshape(3, 1, 1).tolist(),
+            "count": [self.count],
+        }
+
+
 def _arrow_array(values: list[Any], shape: tuple[int, ...], dtype: str, pa: Any) -> Any:
     if dtype == "float32":
         arrow_scalar = pa.float32()
@@ -660,7 +695,17 @@ def _arrow_array(values: list[Any], shape: tuple[int, ...], dtype: str, pa: Any)
 class LeRobotV3Writer:
     """Small dependency-light writer for the public LeRobot v3 layout."""
 
-    def __init__(self, root: Path, fps: int, task: str):
+    def __init__(
+        self,
+        root: Path,
+        fps: int,
+        task: str,
+        *,
+        state_names: list[str] | None = None,
+        sync_names: list[str] | None = None,
+    ):
+        self.custom_state_names = state_names
+        self.custom_sync_names = sync_names
         self.root = root
         self.fps = fps
         self.task = task
@@ -674,7 +719,7 @@ class LeRobotV3Writer:
         self.total_frames = 0
         self.total_video_frames = 0
         self.accumulators: dict[str, _StatsAccumulator] = {}
-        self.video_accumulators: dict[str, _StatsAccumulator] = {}
+        self.video_accumulators: dict[str, ImageStatsAccumulator] = {}
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _initialize(self, frame: DerivedFrame) -> None:
@@ -691,23 +736,25 @@ class LeRobotV3Writer:
             "left_x",
             "left_y",
             "left_z",
-            "left_rot6d_row0_x",
-            "left_rot6d_row0_y",
-            "left_rot6d_row0_z",
-            "left_rot6d_row1_x",
-            "left_rot6d_row1_y",
-            "left_rot6d_row1_z",
+            "left_rot6d_col0_x",
+            "left_rot6d_col0_y",
+            "left_rot6d_col0_z",
+            "left_rot6d_col1_x",
+            "left_rot6d_col1_y",
+            "left_rot6d_col1_z",
             "right_x",
             "right_y",
             "right_z",
-            "right_rot6d_row0_x",
-            "right_rot6d_row0_y",
-            "right_rot6d_row0_z",
-            "right_rot6d_row1_x",
-            "right_rot6d_row1_y",
-            "right_rot6d_row1_z",
+            "right_rot6d_col0_x",
+            "right_rot6d_col0_y",
+            "right_rot6d_col0_z",
+            "right_rot6d_col1_x",
+            "right_rot6d_col1_y",
+            "right_rot6d_col1_z",
         ]
-        state_names = [*vector_names, "left_gripper_open", "right_gripper_open"]
+        action_names = [*vector_names, "left_gripper_open", "right_gripper_open"]
+        state_names = self.custom_state_names or action_names
+        sync_names = self.custom_sync_names or ["wrist_left", "wrist_right", "left_pose", "right_pose"]
         self.features = {
             # These five columns are part of the LeRobot v3 data contract.  The
             # loader builds the Arrow schema from info.json, so they must be
@@ -717,22 +764,17 @@ class LeRobotV3Writer:
             "episode_index": {"dtype": "int64", "shape": [1], "names": None},
             "index": {"dtype": "int64", "shape": [1], "names": None},
             "task_index": {"dtype": "int64", "shape": [1], "names": None},
-            "observation.state": {"dtype": "float32", "shape": [ACTION_DIM], "names": state_names},
+            "observation.state": {"dtype": "float32", "shape": [len(state_names)], "names": state_names},
             "action": {
                 "dtype": "float32",
                 "shape": [ACTION_DIM],
-                "names": state_names,
+                "names": action_names,
             },
             "observation.source_timestamp_ns": {"dtype": "int64", "shape": [1], "names": None},
             "observation.sync_skew_ns": {
                 "dtype": "int64",
-                "shape": [4],
-                "names": [
-                    "wrist_left",
-                    "wrist_right",
-                    "left_pose",
-                    "right_pose",
-                ],
+                "shape": [len(sync_names)],
+                "names": sync_names,
             },
         }
         for key, shape in image_shapes.items():
@@ -755,7 +797,7 @@ class LeRobotV3Writer:
             for key, value in self.features.items()
             if value["dtype"] != "video"
         }
-        self.video_accumulators = {key: _StatsAccumulator((3, 1, 1), "float32") for key in image_shapes}
+        self.video_accumulators = {key: ImageStatsAccumulator() for key in image_shapes}
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -805,6 +847,8 @@ class LeRobotV3Writer:
                 "ee_pose must have shape (18,) and action must have shape (20,) "
                 "(dual-arm xyz + rot6d + two grippers)"
             )
+        if frame.state.shape != tuple(self.features["observation.state"]["shape"]):
+            raise ValueError("state shape does not match dataset feature contract")
         images = {
             "observation.images.head": frame.head_rgb,
             "observation.images.wrist_left": frame.wrist_left_rgb,
@@ -812,8 +856,7 @@ class LeRobotV3Writer:
         }
         for key, image in images.items():
             self._ensure_video(key, image).write(image)
-            pixels = np.asarray(image, dtype=np.float32).transpose(2, 0, 1)[:, :, :, None]
-            self.video_accumulators[key].update(pixels.mean(axis=(1, 2, 3)).reshape(3, 1, 1) / 255.0)
+            self.video_accumulators[key].update(image)
         row = {
             "timestamp": np.float32(frame_index / self.fps),
             "frame_index": int(frame_index),
@@ -1301,28 +1344,28 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
             "head": {"resize": None, "channels": 3},
         },
         "state": "20D: left/right EE pose (9D each) plus binary left/right gripper state",
-        "observation_ee_pose": "18D: left xyz+rot6d_rows followed by right xyz+rot6d_rows, relative to midpoint base",
-        "pose_rotation_representation": "rot6d_rows: first two rows of each 3x3 rotation matrix flattened row-major",
+        "observation_ee_pose": "18D: left xyz+rot6d_columns followed by right xyz+rot6d_columns, relative to midpoint base",
+        "pose_rotation_representation": "rot6d_columns: first two columns of each 3x3 rotation matrix flattened column-major",
         "pose_frame_assumption": "left/right current_pose payloads are respectively relative to their arm base links; static USD link0-to-midpoint transforms are applied",
         # Keep the human-readable legacy field and expose the machine-readable
         # action contract separately for real-robot bundle exporters.
         "action": (
             "20D next valid synchronized frame target after 30Hz resampling: "
-            "left/right xyz+rot6d_rows followed by normalized left/right gripper "
+            "left/right xyz+rot6d_columns followed by normalized left/right gripper "
             "states in {0,1}."
         ),
         "action_dim": ACTION_DIM,
         "action_spec": {
             "dimension": ACTION_DIM,
             "ee_dimension": 9,
-            "ee_rotation": "rot6d_rows",
+            "ee_rotation": "rot6d_columns",
             "layout": {
                 "left_ee": [0, 9],
                 "right_ee": [9, 18],
                 "left_gripper": 18,
                 "right_gripper": 19,
             },
-            "ee_format": "xyz + continuous rot6d (first two rotation-matrix rows flattened row-major)",
+            "ee_format": "xyz + continuous rot6d (first two rotation-matrix columns flattened column-major)",
             "gripper_range": [0.0, 1.0],
             "gripper_encoding": "binary thresholded open state",
         },
@@ -1345,9 +1388,7 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
     }
     extras = args.output.expanduser().resolve() / "franka_duo_extras"
     extras.mkdir(parents=True, exist_ok=True)
-    (extras / "derived_manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
+    (extras / "derived_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
 
 

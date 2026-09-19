@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .action_spec import rot6d_to_matrix
+from .action_spec import matrix_to_rot6d, rot6d_to_matrix
 from .cartesian_chunk import check_tracking, pose_distance
 from .config_io import load_mapping
 from .joint_servo_client import chunk_payload, parse_status
@@ -47,8 +47,9 @@ def sanitize_chunk(
     max_step_rad: float,
     first_offset_m: float,
     first_offset_rad: float,
+    binary_grippers: bool = True,
 ):
-    """Re-orthonormalize rot6d rows, threshold grippers, and check jumps. Returns float32[H,20] and stats."""
+    """Check rot6d columns and jumps; optionally threshold grippers. Returns float32[H,20] and stats."""
     array = np.asarray(actions, dtype=np.float32)
     if array.ndim != 2 or array.shape[1] != 20 or not np.isfinite(array).all():
         raise ValueError(f"server chunk must be finite [H,20], got {array.shape}")
@@ -56,11 +57,15 @@ def sanitize_chunk(
     for offset in (0, 9):
         for row in cleaned:
             matrix = rot6d_to_matrix(row[offset + 3 : offset + 9])
-            row[offset + 3 : offset + 9] = matrix[:2].reshape(-1)
+            row[offset + 3 : offset + 9] = matrix_to_rot6d(matrix)
     raw_grippers = cleaned[:, 18:].copy()
-    cleaned[:, 18:] = (cleaned[:, 18:] >= 0.5).astype(np.float32)
+    if binary_grippers:
+        cleaned[:, 18:] = (cleaned[:, 18:] >= 0.5).astype(np.float32)
     for row in cleaned:
-        contract.validate_action(row)
+        if binary_grippers:
+            contract.validate_action(row)
+        else:
+            contract.action_spec.validate(row, clip=False)
     previous = state
     max_pos, max_rot = 0.0, 0.0
     for index, row in enumerate(cleaned):

@@ -11,6 +11,10 @@
 本仓库不包含训练、仿真、Docker、底层 Franka 控制器、IK/轨迹执行器或 ARA。ROS 2、
 ZED、RealSense、Franka 和 Robotiq 驱动均由真机主机提供。
 
+FastWAM 的 `32×14` 增量动作服务可使用新增的 `delta14_client` 和 `delta14_stream`，
+详见 [Delta14 客户端与执行说明](docs/DELTA14_STREAM.md)。该路径默认 dry-run，
+按请求观测累积增量为现有 servo 的 20D 绝对目标，仅保留本地推理日志，不录制 MCAP。
+
 ## 为什么默认录原始 MCAP
 
 除 6 路高频双臂/夹爪状态 stream 的轻量 relay 外，现场采集进程不再自行订阅数据，也不解码、
@@ -385,8 +389,8 @@ T_newbase_from_ee = T_newbase_from_armbase @ T_armbase_from_ee
 样例 v1 bag 中两路 `current_pose.header.frame_id` 都观测为 `base`，这只是驱动写入的字符串，
 不能单独证明两路 payload 都已经在同一个物理 frame。转换器按左右 topic 的约定分别应用
 对应 arm-base 变换；现场应核对驱动语义，必要时用标定矩阵修正，不能把不同 frame 的 pose
-直接拼接。输出中的 `observation.ee_pose` 是左右各 `xyz + rot6d_rows` 的 18D 向量；
-`rot6d_rows` 是每个 3×3 旋转矩阵前两行按行展平的连续 6D 表示。没有在线 FK，也不使用
+直接拼接。输出中的 `observation.ee_pose` 是左右各 `xyz + rot6d_columns` 的 18D 向量；
+`rot6d_columns` 是每个 3×3 旋转矩阵前两列按列展平的连续 6D 表示。没有在线 FK，也不使用
 measured joints 伪造末端 pose。
 
 ### 对齐、state 与 action
@@ -419,8 +423,8 @@ Eval 在线读取 ZED RGB/depth 生成 manifest 规定的 XYZ 或 XYZRGB 点云�
 RGB。点数、3/6 通道、空间裁剪、外参、adaptive/FPS 采样必须与训练 bundle 一致。模型输出：
 
 ```text
-[0:9]    left EE:  xyz + rotation matrix first two rows (rot6d_rows)
-[9:18]   right EE: xyz + rotation matrix first two rows (rot6d_rows)
+[0:9]    left EE:  xyz + rotation matrix first two columns (rot6d_columns)
+[9:18]   right EE: xyz + rotation matrix first two columns (rot6d_columns)
 [18]     left gripper open fraction, [0,1]
 [19]     right gripper open fraction, [0,1]
 ```
@@ -537,7 +541,7 @@ episode，`q` 退出。MCAP 仍由 rosbag2 以原始 topic 录制，模型动作
 
 声明 `state_key` 的 DP3 bundle 会读取 `/franka_duo/semantic_joint_states` 以及左右
 `current_pose`，在 eval 进程内构造与训练一致的 34D state（14D measured joints + 2D
-gripper opening + 18D dual-EE pose）；其中 18D pose 为每臂 XYZ 加旋转矩阵前两行展平的
+gripper opening + 18D dual-EE pose）；其中 18D pose 为每臂 XYZ 加旋转矩阵前两列按列展平的
 连续 6D 表示。请填写夹爪标定，并在 MCAP topic 配置中保留上述三条
 输入 topic。纯点云 + 双腕 RGB bundle 可不提供 state。raw MCAP 仍保持原始 topic，不会写入
 额外聚合字段。
@@ -551,3 +555,15 @@ uv run --extra dev ruff check src tests
 ```
 
 硬件测试需 source ROS 环境。单元测试不得发布机器人动作。
+
+## labs FR3 station export
+
+For the 10.3.8.31 dual-FR3 station, see [LABS_FR3_31_EXPORT.md](docs/LABS_FR3_31_EXPORT.md).
+The repository rotation contract is now `rot6d_columns`: `[R00,R10,R20,R01,R11,R21]`.
+The labs adapter exports measured state[34], recorded-target action[20], binary
+grippers and 640x480 RGB videos in LeRobot v3 format.
+
+The separate [Labs FastWAM client](docs/LABS_CLIENT.md) sends live state[34] and
+three 640x480 images over `fastwam.msgpack.v1`, reconstructs all 32 delta14 rows
+against the request's initial state, and defaults to dry-run. Explicit execution
+uses the Labs site relay with full-chunk IK validation and completion feedback.

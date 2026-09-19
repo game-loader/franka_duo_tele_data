@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,9 +111,20 @@ class RGB20DContract:
 
 
 class RGB20DCache(EvalObservationCache):
-    """Keep ROS receipt time for headerless grippers, matching raw rosbag2."""
+    """Retain high-rate state history separately from the much larger images."""
+
+    def __init__(self, *, history_size: int = 30, state_history_size: int = 1000):
+        super().__init__(history_size=history_size)
+        if state_history_size <= 0:
+            raise ValueError("state_history_size must be positive")
+        # Direct arm feedback is ~1 kHz: 120 messages cover only 120 ms,
+        # shorter than camera delivery latency plus synchronization lookahead.
+        # Keep one second at 1 kHz without increasing image-buffer memory.
+        for name in ("left_pose", "right_pose", "left_gripper_states", "right_gripper_states"):
+            setattr(self, name, deque(maxlen=state_history_size))
 
     def _store(self, target, message: Any) -> None:
+        # Headerless grippers use ROS-compatible receipt timestamps.
         with self._condition:
             target.append(TimedValue(message, time.monotonic_ns(), _stamp_ns(message) or time.time_ns()))
             self._revision += 1
@@ -137,12 +149,16 @@ class RGB20DReader:
         while time.monotonic() < deadline:
             snapshot = self.cache.snapshot()
             now = time.monotonic_ns()
-            # Wait the same lookahead as offline conversion, then take the
-            # newest complete head frame to avoid accumulating camera latency.
+            stamp_now = time.time_ns()
+            # Lookahead is relative to capture time, not network receipt. A
+            # delayed camera frame has already consumed some/all of that wait.
+            # Waiting again after receipt can age matching state past 200 ms.
             heads = [
                 h
                 for h in snapshot["images"]["head"]
-                if h.stamp_ns > self.last_stamp and self.settle_ns <= now - h.arrival_ns <= self.max_age_ns
+                if h.stamp_ns > self.last_stamp
+                and 0 <= now - h.arrival_ns <= self.max_age_ns
+                and self.settle_ns <= stamp_now - h.stamp_ns <= self.max_age_ns
             ]
             if heads:
                 head = max(heads, key=lambda h: h.stamp_ns)
@@ -180,6 +196,7 @@ class RGB20DReader:
         """Describe missing/stale streams without changing matching or freshness limits."""
         snapshot = self.cache.snapshot()
         now = time.monotonic_ns()
+        stamp_now = time.time_ns()
         streams = {key: snapshot["images"][key] for key in CAMERAS}
         for side in ("left", "right"):
             streams[f"{side}_pose"] = snapshot[f"{side}_pose"]
@@ -191,15 +208,22 @@ class RGB20DReader:
                 for key, values in streams.items()
                 if values
             },
+            "retained_stamp_span_ms": {
+                key: round((values[-1].stamp_ns - values[0].stamp_ns) / 1e6, 1)
+                for key, values in streams.items()
+                if values
+            },
         }
         heads = [
             value
             for value in streams["head"]
             if value.stamp_ns > self.last_stamp
-            and self.settle_ns <= now - value.arrival_ns <= self.max_age_ns
+            and 0 <= now - value.arrival_ns <= self.max_age_ns
+            and self.settle_ns <= stamp_now - value.stamp_ns <= self.max_age_ns
         ]
         if heads:
             head = max(heads, key=lambda value: value.stamp_ns)
+            details["anchor_header_age_ms"] = round((stamp_now - head.stamp_ns) / 1e6, 1)
             details["nearest_to_head_ms"] = {
                 key: round(
                     (

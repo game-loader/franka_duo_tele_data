@@ -86,18 +86,18 @@ inline bool isFiniteQuaternion(const Eigen::Quaterniond& quaternion) {
   return quaternion.coeffs().allFinite() && quaternion.norm() > 1e-8;
 }
 
-inline Matrix3d rot6dRowsToMatrix(const std::array<double, 6>& values) {
+inline Matrix3d rot6dColumnsToMatrix(const std::array<double, 6>& values) {
   Eigen::Vector3d first(values[0], values[1], values[2]);
   Eigen::Vector3d second(values[3], values[4], values[5]);
   const double first_norm = first.norm();
   if (!std::isfinite(first_norm) || first_norm < 1e-8) {
-    throw std::invalid_argument("rot6d first row is degenerate");
+    throw std::invalid_argument("rot6d first column is degenerate");
   }
   first /= first_norm;
   second -= first.dot(second) * first;
   const double second_norm = second.norm();
   if (!std::isfinite(second_norm) || second_norm < 1e-8) {
-    throw std::invalid_argument("rot6d rows are collinear");
+    throw std::invalid_argument("rot6d columns are collinear");
   }
   second /= second_norm;
   Eigen::Vector3d third = first.cross(second);
@@ -107,9 +107,9 @@ inline Matrix3d rot6dRowsToMatrix(const std::array<double, 6>& values) {
   third.normalize();
 
   Matrix3d result;
-  result.row(0) = first.transpose();
-  result.row(1) = second.transpose();
-  result.row(2) = third.transpose();
+  result.col(0) = first;
+  result.col(1) = second;
+  result.col(2) = third;
   if (!isRotation(result)) {
     throw std::invalid_argument("rot6d did not produce a valid rotation");
   }
