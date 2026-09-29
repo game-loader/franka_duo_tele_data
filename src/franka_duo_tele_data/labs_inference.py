@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from .labs_action_delta import CONVENTION, DELTA_NAMES, DELTA_REPRESENTATION, delta14_to_absolute20
+from .labs_joint_dataset import JOINT_NAMES, SCHEMA as JOINT_DATASET_SCHEMA
 from .labs_kinematics import URDFFK, joint_positions, pose_vector, vector_pose
 from .labs_mcap_to_lerobot import CAMERAS, STATE_NAMES, TASK, binary_gripper, numeric_topics, validate_knuckle
 from .ros_utils import _stamp_ns, image_msg_to_rgb
@@ -24,6 +25,9 @@ RETURN_SCHEMA = "labs_fr3_episode_joint_return_v2"
 COMMAND_SCHEMA = "labs_fr3_link8_absolute20_command_v1"
 STATUS_SCHEMA = "labs_fr3_relay_status_v1"
 CHUNK_REFERENCE = "request_observation"
+CHUNK_INTEGRATION = "cumulative_link0_delta14_v1"
+ABSOLUTE_REPRESENTATION = "labs_fr3_link8_columns_state20_next_measured_action20_v1"
+ABSOLUTE_INTEGRATION = "absolute_link0_pose20_v1"
 FR3_REPRESENTATION = "franka_fr3_duo_link8_delta14_v1"
 GRIPPER_POSTPROCESS = "binary_open_ge_0.5_v1"
 TOPICS = {**CAMERAS, **{k: v for k, v in numeric_topics().items() if not k.endswith("target")}}
@@ -40,6 +44,40 @@ class LabsContract:
         if dataset is not None:
             info = json.loads((dataset / "meta/info.json").read_text())
             manifest = json.loads((dataset / "meta/conversion_manifest.json").read_text())
+            if manifest.get("schema") == ABSOLUTE_REPRESENTATION:
+                if (
+                    info.get("codebase_version") != "v3.0" or info.get("fps") != 30
+                    or any(info["features"][key].get("shape") != [20]
+                           or info["features"][key].get("names") != STATE_NAMES[:20]
+                           for key in ("observation.state", "action"))
+                    or manifest.get("normalized") is not False
+                    or manifest.get("absolute_pose") is not True
+                    or manifest.get("rotation_representation") != "rot6d_columns"
+                    or manifest.get("tool_offset_m") != 0
+                    or manifest.get("frames") != {s: f"{s}_fr3_link0" for s in SIDES}
+                    or manifest.get("tips") != {s: f"{s}_fr3_link8" for s in SIDES}
+                    or manifest.get("urdf_sha256") != self.model_hashes
+                    or any(info["features"][f"observation.images.{k}"].get("shape") != [480, 640, 3]
+                           for k in CAMERAS)
+                ):
+                    raise ValueError("Expected raw Labs next-measured pose20 dataset contract")
+                self.task = manifest["task"]
+                return
+            if manifest.get("schema") == JOINT_DATASET_SCHEMA:
+                if (
+                    info.get("codebase_version") != "v3.0" or info.get("fps") != 30
+                    or any(info["features"][key].get("shape") != [16]
+                           or info["features"][key].get("names") != JOINT_NAMES
+                           for key in ("observation.state", "action"))
+                    or manifest.get("joint_units") != "rad"
+                    or manifest.get("joint_representation") != "absolute joint position"
+                    or manifest.get("normalized") is not False
+                    or any(info["features"][f"observation.images.{k}"].get("shape") != [480, 640, 3]
+                           for k in CAMERAS)
+                ):
+                    raise ValueError("Expected raw Labs absolute joint16 dataset contract")
+                self.task = manifest["task"]
+                return
             if (
                 info.get("codebase_version") != "v3.0"
                 or info.get("fps") != 30
@@ -93,15 +131,50 @@ def episode_start(dataset: Path, episode: int, contract):
             columns=["observation.state"],
             filters=[("episode_index", "=", episode), ("frame_index", "=", 0)],
         )
-        found.extend(table["observation.state"].to_pylist())
+        found.extend((path, row) for row in table["observation.state"].to_pylist())
     if len(found) != 1:
         raise ValueError(f"Expected exactly one episode {episode}, frame 0; found {len(found)}")
-    return contract.validate_state(found[0])
+    path, value = found[0]
+    if len(value) == 20:
+        # Pose20 exports keep the recorded measured joints in a hashed sidecar.
+        # Recover those joints, never action[0] or an arbitrary IK solution.
+        manifest = json.loads((dataset / "meta/conversion_manifest.json").read_text())
+        if manifest.get("schema") != ABSOLUTE_REPRESENTATION or manifest.get("urdf_sha256") != contract.model_hashes:
+            raise ValueError("Pose20 restore requires matching measured-joint provenance/URDF")
+        entries = [e for e in manifest["episodes"] if e["episode_index"] == episode]
+        if len(entries) != 1:
+            raise ValueError("Missing/duplicate measured provenance for restore episode")
+        evidence = entries[0]
+        provenance = (dataset / evidence["measured_provenance"]).resolve()
+        if dataset.resolve() not in provenance.parents:
+            raise ValueError("Measured provenance must be inside the selected dataset")
+        if hashlib.sha256(provenance.read_bytes()).hexdigest() != evidence["measured_provenance_sha256"]:
+            raise ValueError("Measured provenance checksum mismatch")
+        timestamps = pq.read_table(
+            path, columns=["observation.source_timestamp_ns"],
+            filters=[("episode_index", "=", episode), ("frame_index", "=", 0)],
+        )["observation.source_timestamp_ns"].to_pylist()
+        with np.load(provenance, allow_pickle=False) as data:
+            joints = data["measured_joints"][0]
+            if (joints.shape != (14,) or timestamps != [int(data["timestamps_ns"][0])]
+                    or not np.array_equal(np.asarray(value), data["measured_pose20"][0])):
+                raise ValueError("First observation does not match its measured-joint provenance")
+            return contract.validate_state(np.concatenate((value, joints)))
+    if len(value) == 16:
+        from .labs_joint_inference import split_targets
+
+        joints, grippers = split_targets([value])
+        return contract.state({"left": joints[0, :7], "right": joints[0, 7:]}, grippers[0])
+    return contract.validate_state(value)
 
 
 def start_identity(state, episode, contract):
     """Content identity portable across client/relay dataset mount paths."""
     value = contract.validate_state(state)
+    # Joint16 stores float32 joints, while the older pose columns were FK of
+    # float64 provenance. Canonicalize poses from the stored joints so both
+    # exports identify the same measured return target despite FK roundoff.
+    value = contract.state({"left": value[20:27], "right": value[27:34]}, value[18:20])
     payload = {
         "episode_index": episode,
         "frame_index": 0,
@@ -133,11 +206,29 @@ def validate_response(result):
     return result
 
 
-def reconstruct_chunk(result, state, *, max_delta_m=0.25, max_delta_rad=1.0):
-    """The server rebases ALL rows to this request's measured observation.
+def absolute_targets(result, *, rows=16):
+    """Validate physical absolute pose20, orthogonalize columns, threshold grippers."""
+    if result.get("action_representation") != ABSOLUTE_REPRESENTATION or result.get("normalized") is not False:
+        raise ValueError("Expected unnormalized absolute pose20 contract")
+    actions = np.asarray(result.get("actions"), dtype=float)
+    if actions.shape != (rows, 20) or not np.isfinite(actions).all():
+        raise ValueError(f"Expected finite absolute actions[{rows},20]")
+    targets = actions.copy()
+    for row in targets:
+        for offset in (0, 9):
+            # Gram-Schmidt on the first two COLUMNS; rejects zero/collinear axes.
+            pose = vector_pose(row[offset:offset + 9])
+            row[offset + 3:offset + 9] = pose_vector(pose)[3:]
+    targets[:, 18:] = (actions[:, 18:] >= 0.5).astype(float)
+    return targets
 
-    This is the explicitly agreed inference-chunk contract. The dataset's
-    individual rows still reference their own states; do not change its labels.
+
+def reconstruct_chunk(result, state, *, max_delta_m=0.25, max_delta_rad=1.0):
+    """Accumulate each delta onto the previous target, seeded by this observation.
+
+    Translation stays in each arm's link0 axes; rotations compose on the left.
+    Grippers are absolute values. This client execution convention does not
+    change the dataset converter's same-row measured-state label convention.
     """
     delta = validate_response(result)
     for offset in (0, 6):
@@ -145,8 +236,13 @@ def reconstruct_chunk(result, state, *, max_delta_m=0.25, max_delta_rad=1.0):
             raise ValueError("Labs translation delta exceeds limit")
         if np.any(np.linalg.norm(delta[:, offset + 3 : offset + 6], axis=1) > max_delta_rad):
             raise ValueError("Labs rotation delta exceeds limit")
-    references = np.broadcast_to(state, (len(delta), 34))
-    return delta14_to_absolute20(delta, references)
+    targets = []
+    reference = state
+    for row in delta:
+        target = delta14_to_absolute20(row, reference)
+        targets.append(target)
+        reference = target
+    return np.stack(targets)
 
 
 def validate_target(target):

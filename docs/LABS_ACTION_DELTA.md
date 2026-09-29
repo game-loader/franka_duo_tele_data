@@ -99,7 +99,7 @@ mean/std/min/max for later training normalization, but calculating statistics
 does not normalize the stored action/state. Training policy preprocessing
 chooses whether/how to normalize using these statistics.
 
-## Exported on 10.3.8.31
+## Exported on 100.90.202.124
 
 Under `/home/agile/work/labs/data/lerobot/`:
 

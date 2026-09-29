@@ -558,7 +558,7 @@ uv run --extra dev ruff check src tests
 
 ## labs FR3 station export
 
-For the 10.3.8.31 dual-FR3 station, see [LABS_FR3_31_EXPORT.md](docs/LABS_FR3_31_EXPORT.md).
+For the 100.90.202.124 dual-FR3 station, see [LABS_FR3_31_EXPORT.md](docs/LABS_FR3_31_EXPORT.md).
 The repository rotation contract is now `rot6d_columns`: `[R00,R10,R20,R01,R11,R21]`.
 The labs adapter exports measured state[34], recorded-target action[20], binary
 grippers and 640x480 RGB videos in LeRobot v3 format.

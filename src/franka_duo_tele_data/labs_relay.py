@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import labs_joint_inference as joint_policy
 from .labs_action_delta import absolute20_to_delta14
 from .labs_episode import REPLAY_SCHEMA, load_episode
 from .labs_ik import MoveItKDL
@@ -36,6 +37,7 @@ from .labs_inference import (
 )
 from .labs_kinematics import joint_positions
 from .labs_mcap_to_lerobot import validate_knuckle
+from .labs_task_starts import load_task_starts
 from .labs_tracking import track_chunk
 from .ros_utils import _stamp_ns
 
@@ -65,11 +67,13 @@ def admit_command(command, contract, measured, *, now_ns=None, planning_complete
                 raise ValueError("Robot moved since replay request")
         return
     if (
-        command.get("schema") != COMMAND_SCHEMA
+        command.get("schema") not in (COMMAND_SCHEMA, joint_policy.COMMAND_SCHEMA)
         or command.get("chunk_reference") != CHUNK_REFERENCE
         or command.get("mode", "policy_chunk") != "policy_chunk"
     ):
         raise ValueError("Incompatible Labs command/URDF/reference")
+    if command["schema"] == joint_policy.COMMAND_SCHEMA and command.get("chunk_integration") != joint_policy.INTEGRATION:
+        raise ValueError("Expected absolute joint16 integration")
     command_age = 10_000_000_000 if planning_complete else 1_000_000_000
     for name, limit in (("created_ns", command_age), ("observation_ns", 10_000_000_000)):
         stamp = command.get(name)
@@ -220,14 +224,29 @@ def build_plan(command, contract, solvers, measured, *, commanded_start=None):
     current_pose = contract.state({"left": initial[:7], "right": initial[7:]}, reference[18:20])[:20]
     steps = absolute20_to_delta14(targets, np.vstack((current_pose, targets[:-1])))
     extent = absolute20_to_delta14(targets, np.broadcast_to(reference, (len(targets), 34)))
-    for offset in (0, 6):
-        if (
-            np.any(np.linalg.norm(steps[:, offset : offset + 3], axis=1) > 0.04)
-            or np.any(np.linalg.norm(steps[:, offset + 3 : offset + 6], axis=1) > 0.35)
-            or np.any(np.linalg.norm(extent[:, offset : offset + 3], axis=1) > 0.25)
-            or np.any(np.linalg.norm(extent[:, offset + 3 : offset + 6], axis=1) > 1.0)
+    violations = []
+    for side, offset in (("left", 0), ("right", 6)):
+        # Seed-relative rotation covers all principal angles [0, pi], with
+        # float32 tolerance. Per-step rotation is checked separately.
+        for name, values, start, limit, unit in (
+            ("step translation", steps, offset, 0.04, "m"),
+            ("step rotation", steps, offset + 3, 0.35, "rad"),
+            ("chunk translation extent", extent, offset, 0.60, "m"),
+            ("chunk rotation extent", extent, offset + 3, math.pi + 1e-6, "rad"),
         ):
-            raise ValueError("Chunk Cartesian jump/extent exceeds Labs limits")
+            magnitudes = np.linalg.norm(values[:, start : start + 3], axis=1)
+            exceeded = np.flatnonzero(magnitudes > limit)
+            if len(exceeded):
+                peak = int(np.argmax(magnitudes))
+                violations.append(
+                    f"{side} {name}: max={magnitudes[peak]:.6f} {unit}, "
+                    f"limit={limit:.6f} {unit}, first_row={int(exceeded[0])}, max_row={peak}"
+                )
+    if violations:
+        raise ValueError(
+            "Chunk Cartesian jump/extent exceeds Labs limits (zero-based rows): "
+            + "; ".join(violations)
+        )
     return solve_and_track(targets, contract, solvers, initial, commanded_start, 1 / (30 * speed))
 
 
@@ -328,6 +347,7 @@ def run(args):
 
     contract = LabsContract(args.config, args.dataset)
     start_state = episode_start(args.dataset, args.start_episode, contract) if args.dataset else None
+    task_starts = load_task_starts(args.config)
     enabled = args.publish and args.enable_robot
     rclpy.init()
     node = rclpy.create_node("labs_policy_relay")
@@ -555,13 +575,9 @@ def run(args):
                         if complete:
                             state["phase"] = "holding"
                     if ended and state["phase"] == "executing":
-                        close = return_at_goal(plan, actual, measured_velocity()) and (
-                            plan.preserve_grippers
-                            or all(
-                                abs(gripper_feedback[s][0] - plan.grippers[-1, i]) <= 0.15
-                                for i, s in enumerate(SIDES)
-                            )
-                        )
+                        # Grippers can stop on a grasped object. Chunk completion
+                        # depends only on arm position and velocity settling.
+                        close = return_at_goal(plan, actual, measured_velocity())
                         state["settled"], complete = settle_update(
                             state["settled"], close, time.monotonic(), 0.5
                         )
@@ -593,6 +609,8 @@ def run(args):
                 "reason": reason,
                 "phase": state["phase"],
                 "fault": state["fault"],
+                "supported_command_schemas": [COMMAND_SCHEMA, joint_policy.COMMAND_SCHEMA, RETURN_SCHEMA, REPLAY_SCHEMA],
+                "task_start_identities": {str(k): v.identity for k, v in task_starts.items()},
                 "command_id": state["command_id"],
                 "rows": len(state["plan"].grippers) if state["plan"] else 0,
                 "duration_s": state["plan"].duration if state["plan"] else 0,
@@ -624,9 +642,17 @@ def run(args):
                         commanded_start = state["last_q"].copy() if state["last_q"] is not None else q.copy()
                     returning = pending["schema"] == RETURN_SCHEMA
                     if returning:
+                        return_state, return_episode = start_state, args.start_episode
+                        if "task_id" in pending:
+                            task_id = pending["task_id"]
+                            if type(task_id) is not int or task_id not in task_starts:
+                                raise ValueError("Return task_id is not in the station task-start catalog")
+                            return_state, return_episode = task_starts[task_id].state, 0
                         plan = build_return_plan(
-                            pending, contract, q, velocity, start_state, args.start_episode
+                            pending, contract, q, velocity, return_state, return_episode
                         )
+                    elif pending["schema"] == joint_policy.COMMAND_SCHEMA:
+                        plan = joint_policy.build_plan(pending, contract, q, commanded_start=commanded_start)
                     else:
                         if args.ik is None or not args.ik.is_file():
                             raise RuntimeError("Policy execution requires a relay with --ik PATH")

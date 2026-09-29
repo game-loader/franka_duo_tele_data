@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "episodes": 122,
+  "source_frames": 46502,
+  "frames": 46380,
+  "dropped_terminal_observations": 122,
+  "state_shape": [
+    20
+  ],
+  "action_shape": [
+    20
+  ],
+  "all_actions_match_next_measured_pose_and_grippers": true,
+  "cross_episode_transitions": 0,
+  "max_recomputed_fk_error_vs_source": 0.0,
+  "videos_copied_and_fully_decoded": 366,
+  "physical_video_frames_decoded": 139506,
+  "retained_image_frames_in_statistics": 139140,
+  "all_feature_statistics_recomputed": true,
+  "source_unchanged": true,
+  "transition_interval_ms_min_median_max": [
+    30.707,
+    33.371,
+    67.017
+  ],
+  "transition_intervals_over_50ms": 92
+}

@@ -1,0 +1,170 @@
+[
+  {
+    "episode_index": 0,
+    "episode_id": "01a0a8fb-e179-7a40-834b-6610476ef18f",
+    "topics": {
+      "/left/franka_robot_state_broadcaster/measured_joint_states": {
+        "sample_messages": 2000,
+        "log_minus_header_ms": {
+          "min": 0.037766,
+          "median": 0.0526605,
+          "p99": 1.171,
+          "max": 3.101124
+        },
+        "median_header_interval_ms": 0.9998560000000001
+      },
+      "/right/franka_robot_state_broadcaster/measured_joint_states": {
+        "sample_messages": 1999,
+        "log_minus_header_ms": {
+          "min": 0.037823,
+          "median": 0.053292,
+          "p99": 1.155406,
+          "max": 2.793804
+        },
+        "median_header_interval_ms": 0.999999
+      },
+      "/right/follower/gello/joint_states": {
+        "sample_messages": 50,
+        "log_minus_header_ms": {
+          "min": 0.391465,
+          "median": 0.5795545,
+          "p99": 5.560558,
+          "max": 5.560558
+        },
+        "median_header_interval_ms": 40.000326
+      },
+      "/head_camera/zed_node/rgb/image_rect_color": {
+        "sample_messages": 60,
+        "log_minus_header_ms": {
+          "min": 32.61326,
+          "median": 33.658308,
+          "p99": 36.197988,
+          "max": 36.197988
+        },
+        "median_header_interval_ms": 33.3915
+      },
+      "/left/follower/gello/joint_states": {
+        "sample_messages": 50,
+        "log_minus_header_ms": {
+          "min": 0.472669,
+          "median": 0.6848755,
+          "p99": 5.48364,
+          "max": 5.48364
+        },
+        "median_header_interval_ms": 40.001789
+      }
+    }
+  },
+  {
+    "episode_index": 60,
+    "episode_id": "01a0a94d-9055-77bd-8198-2c21c41c0a99",
+    "topics": {
+      "/right/franka_robot_state_broadcaster/measured_joint_states": {
+        "sample_messages": 2000,
+        "log_minus_header_ms": {
+          "min": 0.047435,
+          "median": 0.0774105,
+          "p99": 2.566635,
+          "max": 3.859588
+        },
+        "median_header_interval_ms": 0.99993
+      },
+      "/left/franka_robot_state_broadcaster/measured_joint_states": {
+        "sample_messages": 2000,
+        "log_minus_header_ms": {
+          "min": 0.036708,
+          "median": 0.0622215,
+          "p99": 2.533452,
+          "max": 3.828054
+        },
+        "median_header_interval_ms": 0.9999245
+      },
+      "/head_camera/zed_node/rgb/image_rect_color": {
+        "sample_messages": 60,
+        "log_minus_header_ms": {
+          "min": 32.935346,
+          "median": 34.8886595,
+          "p99": 37.070977,
+          "max": 37.070977
+        },
+        "median_header_interval_ms": 33.39
+      },
+      "/left/follower/gello/joint_states": {
+        "sample_messages": 200,
+        "log_minus_header_ms": {
+          "min": 0.783644,
+          "median": 2.3712615,
+          "p99": 6.83508,
+          "max": 7.137359
+        },
+        "median_header_interval_ms": 40.0090845
+      },
+      "/right/follower/gello/joint_states": {
+        "sample_messages": 200,
+        "log_minus_header_ms": {
+          "min": 0.835843,
+          "median": 2.243862,
+          "p99": 6.804393,
+          "max": 7.245049
+        },
+        "median_header_interval_ms": 39.998772
+      }
+    }
+  },
+  {
+    "episode_index": 121,
+    "episode_id": "01a0a9b4-772d-7944-aef0-9476b3e776e2",
+    "topics": {
+      "/right/franka_robot_state_broadcaster/measured_joint_states": {
+        "sample_messages": 1999,
+        "log_minus_header_ms": {
+          "min": 0.03925,
+          "median": 0.073729,
+          "p99": 1.646879,
+          "max": 8.940799
+        },
+        "median_header_interval_ms": 0.999912
+      },
+      "/left/franka_robot_state_broadcaster/measured_joint_states": {
+        "sample_messages": 2000,
+        "log_minus_header_ms": {
+          "min": 0.027562,
+          "median": 0.051509,
+          "p99": 1.599091,
+          "max": 8.817952
+        },
+        "median_header_interval_ms": 0.999968
+      },
+      "/left/follower/gello/joint_states": {
+        "sample_messages": 747,
+        "log_minus_header_ms": {
+          "min": 0.663243,
+          "median": 8.739661,
+          "p99": 48.365803,
+          "max": 59.58038
+        },
+        "median_header_interval_ms": 39.999225
+      },
+      "/right/follower/gello/joint_states": {
+        "sample_messages": 750,
+        "log_minus_header_ms": {
+          "min": 2.032008,
+          "median": 13.003971,
+          "p99": 45.002027,
+          "max": 57.30487
+        },
+        "median_header_interval_ms": 40.0070625
+      },
+      "/head_camera/zed_node/rgb/image_rect_color": {
+        "sample_messages": 64,
+        "log_minus_header_ms": {
+          "min": 33.155183,
+          "median": 34.156069,
+          "p99": 282.989522,
+          "max": 282.989522
+        },
+        "median_header_interval_ms": 33.372
+      }
+    }
+  }
+]

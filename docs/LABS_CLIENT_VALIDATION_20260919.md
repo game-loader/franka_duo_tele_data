@@ -1,6 +1,162 @@
 # Labs FastWAM client verification — 2026-09-19
 
-Station: `agile@10.3.8.31`. New independent installation:
+> Historical record: fixed-request-pose decoding described below was superseded
+> on 2026-09-20 by `cumulative_link0_delta14_v1` for FastWAM/C23 (and the historical delta14 SmolVLA profile).
+> See `LABS_CLIENT.md` for current execution semantics.
+
+## 2026-09-20 FastWAM absolute joint16 direct endpoint
+
+`labs_control.sh` now defaults to `fastwam_joint16` at
+`ws://workspace.featurize.cn:37388/infer`, binary `fastwam.msgpack.v1`.
+Live `/health` identifies FastWAM-FR3-Joint16, checkpoint step2000, raw state16,
+32x16 absolute joint actions in radians with interleaved left/right grippers.
+A dedicated adapter validates this health/response and maps the versioned wire
+contract to the existing joint16 relay command. Raw health and replies remain
+unchanged in provenance. No IK or delta integration is used for action execution.
+SmolVLA and C23 wrappers explicitly select their own profiles.
+
+147 focused client/joint/recording tests passed, including binary WebSocket
+state projection, raw-reply preservation, all 32 targets, and invalid contract
+rejection. Ruff, TOML, shell syntax and diff checks passed.
+The first real-camera dry-run timed out during upload with the 10 s default;
+a retry with `--timeout 60` succeeded:
+`outputs/fastwam_joint16_live_dryrun_retry_20260920/actions.msgpack`.
+Verification confirms state[16], actions[32,16], exact preservation of joint
+angles (max change 0), absolute_joint16_v1 and `execution=not_published`.
+Offline planning using that request's measured joints passed: 3.556 s reference,
+3.78 s command, peak velocity0.3684 rad/s and reference lag0.1015 rad.
+This is not live tracking verification. No controller restart or model-action
+publication was performed. Backup: `outputs/fastwam_joint16_backup_20260920/before.tar.gz`.
+
+## 2026-09-20 SmolVLA absolute pose20, 16 rows (current client)
+
+Updated and deployed metadata/response checks and the SmolVLA entry point to
+require all 16 absolute pose20 rows. XYZ is unchanged and no delta is added.
+Reference rate remains 9 Hz: 16/9 = 1.778 seconds per chunk plus settling.
+148 focused tests passed, including local binary WebSocket coverage for all
+16 rows and rejection of old 8-row metadata/responses. Ruff, TOML parsing,
+shell syntax and diff checks passed.
+
+The actual remote `/info` still advertised `chunk_size=8` at verification time.
+A no-publication run correctly stopped at metadata validation before inference:
+`outputs/smolvla16_absolute20_dryrun_20260920/actions.msgpack`.
+Live 16-row inference remains unverified until the server switches to 16x20.
+No robot commands or controller changes were made.
+Prior files: `outputs/smolvla16_absolute20_backup_20260920/before.tar.gz`.
+
+## 2026-09-20 SmolVLA 10k absolute pose20, 8 rows (superseded)
+
+Deployed `scripts/labs_smolvla_control.sh` to
+`ws://100.73.14.65:8081/infer`. Live `/info` declares checkpoint step 10000,
+raw state20, `actions[8,20]`, absolute link0/link8 poses with rotation columns,
+`action_normalized=false`, and future measured pose labels (not recorded commands).
+The SmolVLA profile uses `absolute_link0_pose20_v1`: XYZ stays unchanged,
+rotation columns are orthogonalized and binary grippers thresholded at 0.5.
+It does not use the delta14 decoder. FastWAM/C23 and joint16 retain their contracts.
+
+145 focused client, joint16, recording, conversion and delta tests passed.
+Ruff, TOML parsing, shell syntax and diff checks passed. A real-camera dry-run
+on the robot host connected to the actual model and saved:
+`outputs/smolvla_absolute20_10k_dryrun_20260920/actions.msgpack`.
+Archive verification confirms input[20], raw[8,20], targets[8,20], checkpoint10000,
+XYZ maximum change exactly 0, absolute integration and `execution=not_published`.
+The finite raw gripper range was [0.9558986, 1.0113492]; raw values are preserved.
+This verifies live transport and decoding; it does not verify live robot tracking.
+No controller restart or robot publication was performed.
+Prior deployed files: `outputs/smolvla_absolute20_backup_20260920/before.tar.gz`.
+
+## 2026-09-20 SmolVLA response shortened to 4 rows (superseded)
+
+The unchanged endpoint now declares `chunk_size=4`. Client metadata and response
+checks, shell help and current docs require 4x14; state20, horizon50, checkpoint
+40000 and queue metadata32 remain unchanged. All four rows are accumulated,
+recorded and scheduled at 9 Hz (4/9 s reference duration plus settling).
+FastWAM/C23 remain 32 rows. 96 client/recording tests passed; Ruff, TOML, shell
+syntax and diff checks passed. A fresh real-camera WebSocket dry-run on the
+robot host returned and decoded exactly four rows without robot publication:
+`outputs/smolvla4_live_dryrun_20260920/actions.msgpack`.
+Prior deployed files: `outputs/smolvla4_backup_20260920/before.tar.gz`.
+
+## 2026-09-20 SmolVLA response shortened to 8 rows (superseded)
+
+The unchanged Tailnet service now declares `chunk_size=8`, while
+`prediction_horizon=50`, `n_action_steps=32`, checkpoint step 40000 and raw
+state20 remain unchanged. The client requires exactly 8x14 returned actions,
+accumulates and records all eight, then requests a fresh observation after
+completion; it does not pad to 50 or maintain a queue of discarded predictions.
+At 9 Hz the reference duration is 8/9 seconds, excluding settling/inference.
+FastWAM/C23 retain their 32-row contracts.
+
+93 focused client/recording tests passed, along with Ruff, TOML parsing, shell
+syntax and diff checks. Deployed to the robot host; prior files are in
+`outputs/smolvla8_backup_20260920/before.tar.gz`. A fresh real-camera WebSocket
+dry-run passed with 20D state, 8 returned/decoded rows, horizon50, queue metadata32,
+checkpoint40000, `cumulative_link0_delta14_v1`, and no command publication.
+Artifact: `outputs/smolvla8_live_dryrun_20260920/actions.msgpack`.
+
+## 2026-09-20 cumulative execution correction
+
+Latest user-authorized extent adjustment: whole-chunk translation is now 0.60 m
+from the request seed for both arms/all three profiles (supersedes 0.25 m below).
+Detailed rejection messages name the arm, metric, maximum, limit and zero-based
+first/maximum row. 107 focused tests and Ruff/TOML/shell/diff checks passed.
+The 50-row chunk in `outputs/labs_client_1789896045605441612/actions.msgpack`
+now passes Cartesian range checks but its offline KDL planning fails with
+`right IK failed: ik`. No trajectory was published. Report:
+`outputs/cumulative_delta_backup_20260920/60cm_plan_check.json`.
+
+Subsequent user-authorized adjustment: the policy-chunk seed-relative rotation
+limit was raised from 1.0 rad to pi + 1e-6 rad (the whole principal-angle range).
+The per-step 0.35 rad limit and all translation/joint/tracker limits remain.
+105 focused tests passed, including 1.279 rad, pi and a full 2*pi path, plus
+rejection of a 0.36 rad single step. The previously rejected chunk in
+`outputs/labs_client_1789895607948738858/actions.msgpack` then passed actual KDL
+IK and continuous planning offline: 32 rows, duration 3.85 s, maximum planned
+joint velocity 0.478 rad/s. This was not a robot trajectory execution or a
+collision validation (the deployed KDL loader reports missing mesh packages).
+Report: `outputs/cumulative_delta_backup_20260920/relaxed_rotation_plan_check.json`.
+Both followers were deactivated before replacing the faulted relay process;
+the new relay established a measured-position hold and both followers were
+reactivated. Verified `FOLLOWING`, `ready=true`, `phase=holding`, empty fault;
+maximum activation hold error 0.002813 rad. The relaxation applies to all
+three model profiles through their shared relay.
+
+The user's clarification was to accumulate each row from the previous target,
+seeded by the request observation. All Labs profiles now share that decoder:
+link0 XYZ addition, left-composed rotation increments, absolute grippers. The
+command/configuration/trace/console integration marker is
+`cumulative_link0_delta14_v1`; `request_observation` identifies only the seed.
+The absolute20 relay interface is unchanged, so followers and the running relay
+were not restarted. Existing data conversion and dataset replay remain unchanged.
+
+Validation: 101 focused tests passed (client, conversion, delta round-trip and
+recording), Ruff passed, pyproject TOML parsed, shell scripts passed `bash -n`,
+and `git diff --check` passed. Tests cover all three profiles, all 32/50 rows,
+noncommuting rotations on both arms, absolute grippers, per-request reset,
+unchanged raw responses/state, IK input targets and cumulative extent rejection.
+
+Deployed to `/home/agile/work/labs/data/tools/labs31_client`; prior files are in
+`outputs/cumulative_delta_backup_20260920/before.tar.gz`. Real-camera no-motion
+inference passed for FastWAM and SmolVLA, with recordings at:
+
+- `outputs/cumulative_fastwam_dryrun_20260920/actions.msgpack` (32 rows)
+- `outputs/cumulative_smolvla_dryrun_20260920/actions.msgpack` (50 rows)
+
+Independent XYZ cumulative sums and rotation-matrix products matched all saved
+targets within 2e-6; gripper thresholds matched exactly. Both were unpublished.
+C23's deployed shared decoder and mocked WebSocket tests passed, but its live
+endpoint `workspace.featurize.cn:50706` refused connection.
+
+These dry-runs validate decoding, not executable robot trajectories. Offline
+`build_plan` prechecks rejected both sampled chunks under existing cumulative
+extent limits (0.25 m / 1.0 rad). FastWAM maximum rotation from the seed was
+1.007 rad left / 1.577 rad right; SmolVLA maximum displacement was 0.302 m left /
+0.264 m right and rotation 1.233 rad left / 2.113 rad right. No limits were
+relaxed, no actions clipped, and no robot command was published. This also
+preserves the distinction between implementing the requested accumulation and
+proving that same-row measured-state training labels are successive increments.
+
+Station: `agile@100.90.202.124`. New independent installation:
 `/home/agile/work/labs/data/tools/labs31_client`.
 
 Service: `wss://release-organisation-sara-chapters.trycloudflare.com/infer`,
@@ -62,7 +218,7 @@ Gripper command publication is suppressed throughout return/hold. Completion
 requires 0.01 rad position tolerance and 0.02 rad/s measured velocity tolerance
 continuously for 0.5 seconds after trajectory completion.
 
-Validation on 10.3.8.31 (no robot command publishers created):
+Validation on 100.90.202.124 (no robot command publishers created):
 
 - Actual dataset: `labs_fr3_link8_delta14_20260916`, episode 0/frame 0.
 - Fresh measured positions and velocities received for both arms.
@@ -97,7 +253,7 @@ Combined mode returns once before inference. Default remains dry-run; actual
 publication requires both existing gates. Executing modes reuse or launch a
 persistent site relay without switching controllers.
 
-Verified on 10.3.8.31 without robot output:
+Verified on 100.90.202.124 without robot output:
 
 - `outputs/script_restore_check_01`: selected episode 0's recorded 14-joint
   target; did not connect to a model or subscribe to robot/camera streams.
@@ -426,3 +582,68 @@ Validation:
   elimination of oscillation.
 - Live gains confirmed both arms retain K `[240,240,240,240,100,60,20]`,
   D `[20,20,20,10,10,10,5]`, `k_alpha=0.99`.
+
+## Labs SmolVLA Tailnet adapter
+
+Added `scripts/labs_smolvla_control.sh` and the `smolvla` Labs client profile.
+The profile checks `/info`, negotiates `smolvla.msgpack.v1`, sends raw state34
+and RGB640x480 PNGs, and maps validated `action_normalized=false` and
+`action_contract` to the existing planner metadata without changing action
+values. All 32 returned rows are retained despite `prediction_horizon=50`.
+Optional `--task` overrides the validated dataset/server task. Existing chunk
+reference semantics, 9 Hz playback and the site relay are reused.
+
+- 101 focused tests passed, including persistent real-WebSocket transport for
+  all three profiles, unmodified state/actions, custom task propagation,
+  retained raw wire responses and incompatible metadata/response rejection.
+  Full Ruff, TOML and shell syntax checks passed.
+- Deployed to `agile@100.90.202.124`; live camera/state dry-run through the new
+  script completed one 32x14 response with `published=false` and rate 9 Hz.
+  No robot motion was requested during this adapter verification.
+- Endpoint `ws://100.86.181.61:8081/infer`; checkpoint step 5000, SHA256
+  `150a1b334142f78b10e4b8470f1362ea04327d535b7eb9f0a361e61b2b78a2b1`.
+  Single-request round trip 689.41 ms, server inference 213.07 ms.
+- Trace: `outputs/smolvla_adapter_live_dryrun_20260919/trace.jsonl`.
+  Previous client backup: `outputs/smolvla_adapter_backup_1789819778097065807`.
+
+## 2026-09-20: SmolVLA state20 checkpoint 002000
+
+The SmolVLA profile now validates the versioned
+`dual_link8_pose_rot6d_columns_and_grippers20_v1` input contract and sends
+exactly the first 20 raw entries of the full measured state. Internal
+observations, relay references, FK and joint checks retain state34; FastWAM
+and C23 wire inputs remain state34. Recorded observations include both
+`state` (34D) and `model_input_state` (20D for SmolVLA), with
+`model_input_normalized=false`. No action denormalization was added.
+
+- 86 focused tests passed, covering real WebSocket input dimensions for all
+  profiles, rejection of old SmolVLA state34 metadata, unchanged state values,
+  full control references and archive provenance. Ruff, TOML parsing and
+  all shell syntax checks passed.
+- Deployed to the station without restarting the relay. One current-observation
+  dry-run completed using `/data/fr3_sequence/20260919-2031-state20/smolvla/checkpoints/002000`,
+  SHA256 `538bc4d04803199c8909a31b0b30b7fd7ad15b2b656cae08ec1430a3b46cd540`.
+- Sent 20D state and received 32x14 actions; internal command reference 34D;
+  `published=false`. Single-request round trip 566.88 ms, inference 242.04 ms.
+- Artifact: `outputs/smolvla_state20_step2000_live_dryrun_20260920/actions.msgpack`.
+  Source backup: `outputs/smolvla_state20_backup_1789891056845005143`.
+
+## 2026-09-20: SmolVLA full 50-row output, checkpoint 040000
+
+Updated SmolVLA metadata and response checks for `chunk_size=50` and
+`prediction_horizon=50`. `n_action_steps=32` is retained as server policy
+metadata and never truncates returned actions. All 50 rows flow into the
+absolute target command and recording; FastWAM/C23 continue to use 32 rows.
+State input remains 20D, with gripper saturation and raw response retention.
+
+- 90 focused tests, Ruff, TOML and shell syntax passed. Tests exercise the
+  binary WebSocket 50-row response with n_action_steps=32 and confirm the
+  final row survives command construction and archive export.
+- Reconnected from the robot host using the normal SmolVLA script. Current
+  observations returned 50x14; all 50 reconstructed targets were recorded.
+  Checkpoint `/data/fr3_sequence/20260919-2031-state20/smolvla/checkpoints/040000`,
+  SHA256 `869128389aa2a0263e92896769bf30918295140e96492c523e2c5b4021f2bdc7`.
+- Dry-run only (`published=false`): server inference 196.57 ms, round trip
+  468.37 ms. Reference duration at 9 Hz is 5.556 s per chunk before settling.
+- Artifact: `outputs/smolvla_full50_40k_live_dryrun_20260920/actions.msgpack`.
+  Backup: `outputs/smolvla_full50_backup_1789893356521292382`.

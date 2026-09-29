@@ -1,0 +1,21 @@
+{
+  "schema": "labs_task_starts_v1",
+  "tasks": {
+    "1": {
+      "dataset": "/home/agile/work/labs/data/lerobot/labs_fr3_link8_delta14_20260916",
+      "task": "Use the left arm to place the square head into the yellow box on the left, and the right arm to place the screw into the green box on the right."
+    },
+    "2": {
+      "dataset": "/home/agile/work/labs/data/lerobot_next_state20/labs_fr3_link8_next_state20_20260923",
+      "task": "Open the drawer, pick up the white charger and place it inside the drawer, then close the drawer."
+    },
+    "3": {
+      "dataset": "/home/agile/work/labs/data/lerobot_next_state20/labs_fr3_link8_next_state20_20260924_bowls105",
+      "task": "Stack the three bowls together."
+    },
+    "4": {
+      "dataset": "/home/agile/work/labs/data/lerobot_next_state20/labs_fr3_link8_next_state20_20260924_towel98",
+      "task": "Fold the towel."
+    }
+  }
+}

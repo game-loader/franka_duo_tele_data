@@ -1,6 +1,6 @@
 # labs FR3 export — 2026-09-16
 
-Host: `agile@10.3.8.31`.
+Host: `agile@100.90.202.124`.
 
 - Input: `/home/agile/work/labs/data/raw_episodes/2026/09/16`
 - Output: `/home/agile/work/labs/data/lerobot/labs_fr3_link8_columns_20260916`

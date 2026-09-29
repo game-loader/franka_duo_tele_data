@@ -1,0 +1,128 @@
+[
+  {
+    "episode_index": 0,
+    "frames": 320,
+    "sides": {
+      "left": {
+        "record_count": 269,
+        "unique_header_count": 269,
+        "older_header_arrived_after_newer_count": 0,
+        "current_export_exactly_matches_causal_log_selection": true,
+        "header_vs_receipt_selection_different_rows": 0,
+        "header_vs_receipt_target_mae_rad": 0.0,
+        "selected_target_header_age_ms_p50_p95_p99_max": [
+          24.761678500000002,
+          38.63977455,
+          38.8326414,
+          38.950636
+        ],
+        "next_state_mae_current_rad": 0.0202099313876899,
+        "next_state_mae_header_selected_rad": 0.0202099313876899,
+        "best_receipt_lag_frames": 4,
+        "best_header_lag_frames": 4
+      },
+      "right": {
+        "record_count": 269,
+        "unique_header_count": 269,
+        "older_header_arrived_after_newer_count": 0,
+        "current_export_exactly_matches_causal_log_selection": true,
+        "header_vs_receipt_selection_different_rows": 4,
+        "header_vs_receipt_target_mae_rad": 2.123426202160772e-05,
+        "selected_target_header_age_ms_p50_p95_p99_max": [
+          24.047559,
+          37.903941450000005,
+          42.94888107000001,
+          44.478117
+        ],
+        "next_state_mae_current_rad": 0.016229666592665868,
+        "next_state_mae_header_selected_rad": 0.016242721958433733,
+        "best_receipt_lag_frames": 4,
+        "best_header_lag_frames": 4
+      }
+    }
+  },
+  {
+    "episode_index": 60,
+    "frames": 431,
+    "sides": {
+      "left": {
+        "record_count": 1448,
+        "unique_header_count": 362,
+        "older_header_arrived_after_newer_count": 0,
+        "current_export_exactly_matches_causal_log_selection": true,
+        "header_vs_receipt_selection_different_rows": 4,
+        "header_vs_receipt_target_mae_rad": 4.068561247549951e-05,
+        "selected_target_header_age_ms_p50_p95_p99_max": [
+          23.834448,
+          37.637637,
+          37.894763399999995,
+          50.863359
+        ],
+        "next_state_mae_current_rad": 0.018406823247770137,
+        "next_state_mae_header_selected_rad": 0.018445675852290816,
+        "best_receipt_lag_frames": 5,
+        "best_header_lag_frames": 5
+      },
+      "right": {
+        "record_count": 1448,
+        "unique_header_count": 362,
+        "older_header_arrived_after_newer_count": 0,
+        "current_export_exactly_matches_causal_log_selection": true,
+        "header_vs_receipt_selection_different_rows": 12,
+        "header_vs_receipt_target_mae_rad": 0.00010323977039661258,
+        "selected_target_header_age_ms_p50_p95_p99_max": [
+          22.251627,
+          36.034057000000004,
+          42.440776400000004,
+          42.687913
+        ],
+        "next_state_mae_current_rad": 0.013093510398833063,
+        "next_state_mae_header_selected_rad": 0.013192599239539466,
+        "best_receipt_lag_frames": 5,
+        "best_header_lag_frames": 5
+      }
+    }
+  },
+  {
+    "episode_index": 121,
+    "frames": 346,
+    "sides": {
+      "left": {
+        "record_count": 4341,
+        "unique_header_count": 290,
+        "older_header_arrived_after_newer_count": 1,
+        "current_export_exactly_matches_causal_log_selection": true,
+        "header_vs_receipt_selection_different_rows": 44,
+        "header_vs_receipt_target_mae_rad": 0.0011371464934200048,
+        "selected_target_header_age_ms_p50_p95_p99_max": [
+          22.5417725,
+          42.39001375,
+          42.6587277,
+          61.898456
+        ],
+        "next_state_mae_current_rad": 0.024413371783359204,
+        "next_state_mae_header_selected_rad": 0.025369063180179084,
+        "best_receipt_lag_frames": 4,
+        "best_header_lag_frames": 4
+      },
+      "right": {
+        "record_count": 4336,
+        "unique_header_count": 290,
+        "older_header_arrived_after_newer_count": 3,
+        "current_export_exactly_matches_causal_log_selection": true,
+        "header_vs_receipt_selection_different_rows": 96,
+        "header_vs_receipt_target_mae_rad": 0.0019104008097201586,
+        "selected_target_header_age_ms_p50_p95_p99_max": [
+          27.4849815,
+          47.328064999999995,
+          47.60910845,
+          53.564517
+        ],
+        "next_state_mae_current_rad": 0.02194797210318208,
+        "next_state_mae_header_selected_rad": 0.023737409618330298,
+        "best_receipt_lag_frames": 5,
+        "best_header_lag_frames": 5
+      }
+    }
+  }
+]

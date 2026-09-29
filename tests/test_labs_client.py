@@ -15,7 +15,10 @@ from franka_duo_tele_data.action_spec import rot6d_to_matrix
 from franka_duo_tele_data.labs_action_delta import DELTA_REPRESENTATION, absolute20_to_delta14
 from franka_duo_tele_data.labs_client import LabsClient, command_for, parse_args, require_relay
 from franka_duo_tele_data.labs_inference import (
+    ABSOLUTE_INTEGRATION,
+    ABSOLUTE_REPRESENTATION,
     CAMERAS,
+    CHUNK_INTEGRATION,
     CHUNK_REFERENCE,
     STATUS_SCHEMA,
     TOPICS,
@@ -52,18 +55,191 @@ def response(rows=32):
     }
 
 
-def test_entire_chunk_uses_one_observation_never_cumsum(contract):
+def absolute_response(contract):
+    actions = np.tile(state34(contract)[:20], (16, 1)).astype(float)
+    actions[:, 0] += np.arange(1, 17) * 0.001
+    actions[:, 9] -= np.arange(1, 17) * 0.002
+    return {
+        "actions": actions.tolist(), "action": actions[0].tolist(),
+        "action_normalized": False, "action_contract": ABSOLUTE_REPRESENTATION,
+        "chunk_size": 16, "prediction_horizon": 50, "n_action_steps": 32,
+        "request_id": "req",
+    }
+
+
+def smolvla_info(contract):
+    from franka_duo_tele_data.labs_mcap_to_lerobot import STATE_NAMES
+
+    return {
+        "policy_type": "smolvla", "protocol": "smolvla.msgpack.v1",
+        "state_dim": 20, "configured_state_dim": 20,
+        "state_input_contract": "dual_link8_pose_rot6d_columns_and_grippers20_v1",
+        "action_dim": 20, "chunk_size": 16, "n_action_steps": 32,
+        "prediction_horizon": 50, "state_names": STATE_NAMES[:20], "action_names": STATE_NAMES[:20],
+        "action_contract": ABSOLUTE_REPRESENTATION, "image_shape_hwc": [480, 640, 3],
+        "cameras": {name: f"observation.images.{name}" for name in CAMERAS},
+        "default_task": contract.task, "state_input_normalized": False,
+        "action_normalized": False, "absolute_action": True, "is_recorded_command_action": False,
+    }
+
+
+@pytest.mark.parametrize("override", [
+    {"state_dim": 34}, {"configured_state_dim": 34}, {"state_input_contract": "wrong"},
+    {"action_dim": 14}, {"chunk_size": 4}, {"chunk_size": 8}, {"chunk_size": 50}, {"chunk_size": 32}, {"prediction_horizon": 32},
+    {"protocol": "fastwam.msgpack.v1"}, {"state_input_normalized": True},
+    {"action_normalized": True}, {"action_contract": "wrong"},
+    {"image_shape_hwc": [512, 512, 3]}, {"state_names": []},
+    {"action_names": []}, {"absolute_action": False}, {"is_recorded_command_action": True}, {"default_task": "wrong"},
+])
+def test_smolvla_rejects_incompatible_metadata(contract, override):
+    client = LabsClient("ws://unused/infer", contract, server_profile="smolvla")
+    client.health = {**smolvla_info(contract), **override}
+    with pytest.raises(ValueError, match="SmolVLA info"):
+        client.validate_smolvla_info()
+
+
+@pytest.mark.parametrize("override", [
+    {"action_normalized": True}, {"action_normalized": None}, {"action_normalized": 0},
+    {"normalized": True}, {"action_contract": "wrong"}, {"action_representation": "wrong"},
+    {"actions": np.zeros((8, 14)).tolist()}, {"actions": np.zeros((50, 14)).tolist()}, {"actions": np.zeros((32, 14)).tolist()}, {"actions": np.zeros((4, 20)).tolist()}, {"actions": np.zeros((8, 20)).tolist()},
+    {"chunk_size": 4}, {"chunk_size": 8}, {"chunk_size": 50}, {"chunk_size": 32}, {"prediction_horizon": 32},
+    {"action": [1] * 14},
+])
+def test_smolvla_rejects_incompatible_response(contract, override):
+    client = LabsClient("ws://unused/infer", contract, server_profile="smolvla")
+    client.health = smolvla_info(contract)
+    reply = {**absolute_response(contract), **override}
+    with pytest.raises(ValueError):
+        client.adapt_smolvla_response(reply)
+
+
+def test_smolvla_absolute_poses_rotation_columns_and_raw_preservation(contract):
+    client = LabsClient("ws://unused/infer", contract, server_profile="smolvla")
+    client.health = smolvla_info(contract)
+    raw = absolute_response(contract)
+    actions = np.asarray(raw["actions"])
+    # Scaled/nonorthogonal columns describe a +90 degree rotation about z.
+    actions[:, 3:9] = [0, 2, 0, -3, 1, 0]
+    actions[2, 19] = 1.108
+    actions[1, 18] = -0.12
+    actions[3, 18:] = [0.4999, 0.5]
+    raw.update(actions=actions.tolist(), action=actions[0].tolist())
+    adapted = client.adapt_smolvla_response(raw)
+    for state in (state34(contract), state34(contract) + 0.02):
+        command = command_for(adapted, SimpleNamespace(state=state, stamp_ns=time.time_ns()), contract,
+                              server_profile="smolvla")
+        targets = np.asarray(command["targets"])
+        np.testing.assert_array_equal(targets[:, [0, 1, 2, 9, 10, 11]], actions[:, [0, 1, 2, 9, 10, 11]])
+        np.testing.assert_allclose(targets[:, 3:9], np.tile([0, 1, 0, -1, 0, 0], (16, 1)), atol=1e-12)
+        assert targets[2, 19] == 1
+        assert targets[1, 18] == 0
+        np.testing.assert_array_equal(targets[3, 18:], [0, 1])
+        assert command["chunk_integration"] == ABSOLUTE_INTEGRATION
+    np.testing.assert_array_equal(raw["actions"], actions)
+    np.testing.assert_array_equal(raw["action"], actions[0])
+    assert adapted["is_recorded_command_action"] is False
+
+
+@pytest.mark.parametrize("rotation", [[0] * 6, [1, 0, 0, 2, 0, 0]])
+def test_smolvla_rejects_degenerate_rotation(contract, rotation):
+    client = LabsClient("ws://unused/infer", contract, server_profile="smolvla")
+    client.health = smolvla_info(contract)
+    reply = absolute_response(contract)
+    reply["actions"][2][12:18] = rotation
+    with pytest.raises(ValueError):
+        client.adapt_smolvla_response(reply)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_smolvla_rejects_nonfinite_targets(contract, value):
+    client = LabsClient("ws://unused/infer", contract, server_profile="smolvla")
+    client.health = smolvla_info(contract)
+    reply = absolute_response(contract)
+    reply["actions"][2][19] = value
+    with pytest.raises(ValueError, match="Nonfinite"):
+        client.adapt_smolvla_response(reply)
+
+
+@pytest.mark.parametrize("profile,dimension", [("smolvla", 20), ("labs", 34), ("c23", 34)])
+def test_wire_projection_preserves_control_reference_and_action_recording(contract, tmp_path, profile, dimension):
+    from franka_duo_tele_data.labs_action_recording import ActionRecording, load_recording
+    from franka_duo_tele_data.labs_client import model_input_state
+
+    state = state34(contract)
+    original = state.copy()
+    wire = model_input_state(state, profile)
+    np.testing.assert_array_equal(wire, state[:dimension])
+    observation = SimpleNamespace(state=state, stamp_ns=time.time_ns())
+    rows = 16 if profile == "smolvla" else 32
+    reply = response(rows)
+    reply["actions"][-1][0] = 0.017
+    integration = CHUNK_INTEGRATION
+    expected_x = float(state[0]) + (rows - 1) * 0.01 + 0.017
+    if profile == "smolvla":
+        client = LabsClient("ws://unused/infer", contract, server_profile=profile)
+        client.health = smolvla_info(contract)
+        reply = client.adapt_smolvla_response(absolute_response(contract))
+        integration = ABSOLUTE_INTEGRATION
+        expected_x = reply["actions"][-1][0]
+    command = command_for(reply, observation, contract, server_profile=profile)
+    assert len(command["targets"]) == rows
+    assert command["targets"][-1][0] == pytest.approx(expected_x)
+    assert command["chunk_integration"] == integration
+    assert len(command["reference_state"]) == 34
+    np.testing.assert_array_equal(state, original)
+    rec = ActionRecording(tmp_path, {"model_state_dim": dimension})
+    rec.event({"event": "observation", "index": 0, "state": state.tolist(), "model_input_state": wire})
+    rec.event({"event": "wire_response", "response": reply})
+    rec.event({"event": "inference", "command": command, "response": reply})
+    chunk = load_recording(rec.close("normal"))["chunks"][0]
+    assert len(chunk["observation"]["model_input_state"]) == dimension
+    assert len(chunk["observation"]["state"]) == 34
+    assert chunk["command"]["reference_state"] == original.tolist()
+    assert chunk["command"]["chunk_integration"] == integration
+    assert len(chunk["raw_response"]["actions"]) == len(chunk["command"]["targets"]) == rows
+
+
+def test_entire_chunk_accumulates_deltas_from_request_observation(contract):
     state = state34(contract)
     targets = reconstruct_chunk(response(), state)
     assert targets.shape == (32, 20)
-    np.testing.assert_allclose(targets[:, 0], state[0] + 0.01, atol=1e-7)
-    np.testing.assert_allclose(targets[:, 9], state[9] - 0.02, atol=1e-7)
-    expected = Rotation.from_rotvec([0.03, -0.02, 0.04]).as_matrix() @ rot6d_to_matrix(state[3:9])
+    np.testing.assert_allclose(targets[:, 0], state[0] + np.arange(1, 33) * 0.01, atol=5e-7)
+    np.testing.assert_allclose(targets[:, 9], state[9] - np.arange(1, 33) * 0.02, atol=5e-7)
+    expected = Rotation.from_rotvec(np.array([0.03, -0.02, 0.04]) * 32).as_matrix() @ rot6d_to_matrix(state[3:9])
     np.testing.assert_allclose(rot6d_to_matrix(targets[-1, 3:9]), expected, atol=2e-7)
     np.testing.assert_array_equal(targets[:, 18:], np.tile([0, 1], (32, 1)))
     np.testing.assert_allclose(
-        absolute20_to_delta14(targets, np.tile(state, (32, 1))), validate_response(response()), atol=2e-7
+        absolute20_to_delta14(targets, np.vstack((state[:20], targets[:-1]))),
+        validate_response(response()), atol=2e-7,
     )
+
+
+def test_accumulation_keeps_link0_axes_rotation_order_and_absolute_grippers(contract):
+    state = state34(contract)
+    original = state.copy()
+    actions = np.zeros((3, 14))
+    actions[:, :3] = [[0.01, 0, 0], [0.02, 0, 0], [0.01, 0, 0]]
+    actions[:, 6:9] = [[0, -0.01, 0], [0, 0, 0.02], [0, 0.01, 0]]
+    actions[:, 3:6] = [[0.2, 0, 0], [0, 0.3, 0], [0, 0, -0.1]]
+    actions[:, 9:12] = [[0, -0.3, 0], [0.1, 0, 0], [0, 0, 0.2]]
+    actions[:, 12:] = [[0, 1], [1, 0], [0, 1]]
+    reply = {**response(3), "actions": actions.tolist()}
+    targets = reconstruct_chunk(reply, state)
+    np.testing.assert_allclose(targets[:, :3], state[:3] + [[0.01, 0, 0], [0.03, 0, 0], [0.04, 0, 0]], atol=1e-7)
+    np.testing.assert_allclose(targets[:, 9:12], state[9:12] + [[0, -0.01, 0], [0, -0.01, 0.02], [0, 0, 0.02]], atol=1e-7)
+    for pose_offset, delta_offset in ((0, 0), (9, 6)):
+        increments = Rotation.from_rotvec(actions[:, delta_offset + 3:delta_offset + 6]).as_matrix()
+        expected = increments[2] @ increments[1] @ increments[0] @ rot6d_to_matrix(state[pose_offset + 3:pose_offset + 9])
+        np.testing.assert_allclose(rot6d_to_matrix(targets[-1, pose_offset + 3:pose_offset + 9]), expected, atol=2e-7)
+    np.testing.assert_array_equal(targets[:, 18:], actions[:, 12:])
+    np.testing.assert_array_equal(state, original)
+    np.testing.assert_array_equal(reply["actions"], actions)
+    # Each new request starts a new accumulation; no carry-over from prior calls.
+    np.testing.assert_array_equal(reconstruct_chunk(reply, state), targets)
+    other = state.copy()
+    other[[0, 9]] += 0.05
+    shifted = reconstruct_chunk(reply, other)
+    np.testing.assert_allclose(shifted[:, [0, 9]], targets[:, [0, 9]] + 0.05, atol=1e-7)
 
 
 def test_binary_gripper_regression_overshoot_preserves_raw_reply():
@@ -97,7 +273,7 @@ def test_bad_response_rejected(change):
 
 def test_chunk_reference_and_extent_guards(contract):
     # Server temporal prose is retained as provenance; the user-confirmed client
-    # convention remains request-observation-relative for the whole chunk.
+    # convention accumulates deltas from the request observation.
     np.testing.assert_array_equal(
         reconstruct_chunk({**response(), "chunk_reference": "previous_action"}, state34(contract)),
         reconstruct_chunk(response(), state34(contract)),
@@ -133,23 +309,26 @@ def png():
 
 
 @pytest.mark.parametrize(
-    "profile,health_model", [("labs", None), ("c23", "FastWAM-FR3-C23"), ("c23", "wrong")]
+    "profile,health_model",
+    [("labs", None), ("c23", "FastWAM-FR3-C23"), ("c23", "wrong"), ("smolvla", "smolvla")],
 )
-def test_real_websocket_reuses_transport_state34_and_all_rows(contract, profile, health_model):
+def test_real_websocket_projects_model_state_and_preserves_all_rows(contract, profile, health_model):
     import msgpack
     from aiohttp import web
 
     async def scenario():
         requests, connections = [], []
+        protocol = "smolvla.msgpack.v1" if profile == "smolvla" else "fastwam.msgpack.v1"
 
         async def serve(request):
-            ws = web.WebSocketResponse(protocols=("fastwam.msgpack.v1",))
+            ws = web.WebSocketResponse(protocols=(protocol,))
             await ws.prepare(request)
             connections.append(ws)
             async for message in ws:
                 request = msgpack.unpackb(message.data, raw=False)
                 requests.append(request)
-                result = {**response(), "request_id": request["request_id"]}
+                result = absolute_response(contract) if profile == "smolvla" else response()
+                result["request_id"] = request["request_id"]
                 await ws.send_bytes(msgpack.packb(result, use_bin_type=True))
             return ws
 
@@ -159,6 +338,8 @@ def test_real_websocket_reuses_transport_state34_and_all_rows(contract, profile,
         from franka_duo_tele_data.labs_mcap_to_lerobot import STATE_NAMES
 
         async def health(_request):
+            if profile == "smolvla":
+                return web.json_response(smolvla_info(contract))
             return web.json_response(
                 {
                     "ready": True,
@@ -177,7 +358,7 @@ def test_real_websocket_reuses_transport_state34_and_all_rows(contract, profile,
                 }
             )
 
-        app.router.add_get("/health", health)
+        app.router.add_get("/info" if profile == "smolvla" else "/health", health)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -192,12 +373,30 @@ def test_real_websocket_reuses_transport_state34_and_all_rows(contract, profile,
                 assert not requests
                 return
             async with LabsClient(f"ws://127.0.0.1:{port}/infer", contract, server_profile=profile) as client:
-                for _ in range(2):
-                    result = await client.infer(state34(contract), images)
-                    assert reconstruct_chunk(result, state34(contract)).shape == (32, 20)
+                raw_replies = []
+                client.response_sink = raw_replies.append
+                for index in range(2):
+                    result = await client.infer(
+                        state34(contract), images, task="custom task" if index else None
+                    )
+                    rows = 16 if profile == "smolvla" else 32
+                    command = command_for(result, SimpleNamespace(state=state34(contract), stamp_ns=time.time_ns()), contract, server_profile=profile)
+                    assert np.asarray(command["targets"]).shape == (rows, 20)
+                    expected_x = (absolute_response(contract)["actions"][-1][0] if profile == "smolvla"
+                                  else float(state34(contract)[0]) + rows * 0.01)
+                    assert command["targets"][-1][0] == pytest.approx(expected_x)
+                    assert command["chunk_integration"] == (ABSOLUTE_INTEGRATION if profile == "smolvla" else CHUNK_INTEGRATION)
+                    if profile == "smolvla":
+                        assert result["prediction_horizon"] == 50
+                        assert "normalized" not in raw_replies[-1]
+                        assert result["normalized"] is False
+                        np.testing.assert_allclose(result["actions"], raw_replies[-1]["actions"], atol=1e-7)
             assert len(connections) == 1
             assert requests[0]["task"] == contract.task
-            np.testing.assert_array_equal(requests[0]["state"], state34(contract))
+            assert requests[1]["task"] == "custom task"
+            expected_state = state34(contract)[:20] if profile == "smolvla" else state34(contract)
+            for request in requests:
+                np.testing.assert_array_equal(request["state"], expected_state)
             assert requests[0]["images"] == images
             assert requests[0]["request_id"] != requests[1]["request_id"]
         finally:
@@ -241,7 +440,7 @@ def plan_command(contract):
         qs.append(q)
         rows.append(contract.state({"left": q[:7], "right": q[7:]}, [0, 1])[:20])
     result = response(4)
-    result["actions"] = absolute20_to_delta14(np.asarray(rows), np.tile(initial, (4, 1))).tolist()
+    result["actions"] = absolute20_to_delta14(np.asarray(rows), np.vstack((initial[:20], rows[:-1]))).tolist()
     observation = SimpleNamespace(state=initial, stamp_ns=time.time_ns())
     command = command_for(result, observation, contract, speed=1.0)
 
@@ -251,6 +450,7 @@ def plan_command(contract):
             self.side = side
 
         def solve(self, pose, seed):
+            np.testing.assert_allclose(pose, rows[self.index][:9] if self.side == "left" else rows[self.index][9:18], atol=2e-7)
             q = qs[self.index][0:7] if self.side == "left" else qs[self.index][7:14]
             self.index += 1
             return {"success": True, "joint_positions": q}
@@ -289,6 +489,85 @@ def test_last_row_ik_failure_rejects_whole_plan(contract):
     solvers["right"].solve = fail_last
     with pytest.raises(ValueError, match="IK failed"):
         build_plan(command, contract, solvers, state34(contract)[20:])
+
+
+@pytest.mark.parametrize("turn", [1.279, np.pi, 2 * np.pi])
+def test_large_chunk_rotation_reaches_ik_with_small_steps(contract, monkeypatch, turn):
+    from franka_duo_tele_data import labs_relay
+
+    state = state34(contract)
+    actions = np.zeros((50, 14))
+    actions[:, 9] = turn / len(actions)
+    command = command_for(
+        {**response(50), "actions": actions.tolist()},
+        SimpleNamespace(state=state, stamp_ns=time.time_ns()), contract,
+    )
+    checked = []
+
+    def solve(targets, *_args):
+        checked.append(targets)
+        return "reached IK"
+
+    monkeypatch.setattr(labs_relay, "solve_and_track", solve)
+    assert build_plan(command, contract, {}, state[20:]) == "reached IK"
+    np.testing.assert_array_equal(checked[0], command["targets"])
+
+
+def test_large_single_rotation_still_rejected_before_ik(contract):
+    state = state34(contract)
+    actions = np.zeros((1, 14))
+    actions[0, 9] = 0.36
+    command = command_for(
+        {**response(1), "actions": actions.tolist()},
+        SimpleNamespace(state=state, stamp_ns=time.time_ns()), contract,
+    )
+    with pytest.raises(ValueError, match="Cartesian jump/extent"):
+        build_plan(command, contract, {}, state[20:])
+
+
+def test_cumulative_extent_still_rejected_before_ik(contract):
+    state = state34(contract)
+    reply = response(32)
+    actions = np.zeros((32, 14))
+    actions[:, 0] = 0.02  # Individually small, but total displacement is 0.64 m.
+    reply["actions"] = actions.tolist()
+    command = command_for(reply, SimpleNamespace(state=state, stamp_ns=time.time_ns()), contract)
+    with pytest.raises(ValueError, match="Cartesian jump/extent"):
+        build_plan(command, contract, {}, state[20:])
+
+
+def test_extent_error_reports_both_arms_and_rows(contract):
+    state = state34(contract)
+    actions = np.zeros((50, 14))
+    actions[:, 0] = 0.013
+    actions[:, 6] = -0.017
+    command = command_for(
+        {**response(50), "actions": actions.tolist()},
+        SimpleNamespace(state=state, stamp_ns=time.time_ns()), contract,
+    )
+    with pytest.raises(ValueError) as error:
+        build_plan(command, contract, {}, state[20:])
+    message = str(error.value)
+    assert "zero-based rows" in message
+    assert "left chunk translation extent: max=0.650" in message
+    assert "m, limit=0.600000 m, first_row=46, max_row=49" in message
+    assert "right chunk translation extent: max=0.850000 m, limit=0.600000 m, first_row=35, max_row=49" in message
+    assert "rotation:" not in message
+
+
+def test_chunk_translation_under_60cm_reaches_ik(contract, monkeypatch):
+    from franka_duo_tele_data import labs_relay
+
+    state = state34(contract)
+    actions = np.zeros((50, 14))
+    actions[:, 0] = 0.59 / 50
+    actions[:, 6] = -0.5646368 / 50
+    command = command_for(
+        {**response(50), "actions": actions.tolist()},
+        SimpleNamespace(state=state, stamp_ns=time.time_ns()), contract,
+    )
+    monkeypatch.setattr(labs_relay, "solve_and_track", lambda *_args: "reached IK")
+    assert build_plan(command, contract, {}, state[20:]) == "reached IK"
 
 
 def test_stale_moved_and_wrong_model_commands_rejected(contract):
@@ -502,8 +781,10 @@ def test_operation_flags_and_publication_gates(tmp_path):
             parse_args([*base, *invalid])
 
 
-@pytest.mark.parametrize("restore,infer", [(True, False), (False, True), (True, True)])
-def test_run_operation_routing_without_robot_or_network(monkeypatch, tmp_path, contract, restore, infer):
+@pytest.mark.parametrize("restore,infer,interrupt", [
+    (True, False, False), (False, True, False), (True, True, False), (False, True, True),
+])
+def test_run_operation_routing_without_robot_or_network(monkeypatch, tmp_path, contract, restore, infer, interrupt):
     import json
     import sys
     from types import ModuleType
@@ -542,8 +823,12 @@ def test_run_operation_routing_without_robot_or_network(monkeypatch, tmp_path, c
         async def __aexit__(self, *_):
             pass
 
-        async def infer(self, *_):
+        async def infer(self, *_, task=None):
             calls.append("infer")
+            if interrupt and calls.count("infer") == 2:
+                import signal
+                signal.raise_signal(signal.SIGINT)
+                await asyncio.sleep(0)
             return response()
 
     monkeypatch.setattr(module, "LabsObservationCache", Cache)
@@ -551,11 +836,14 @@ def test_run_operation_routing_without_robot_or_network(monkeypatch, tmp_path, c
     monkeypatch.setattr(module, "encode_images", lambda _: {})
     node = SimpleNamespace(create_subscription=lambda *_: None, destroy_node=lambda: None)
     ros = ModuleType("rclpy")
-    ros.init = ros.shutdown = lambda: None
+    ros.init = lambda **_: None
+    ros.shutdown = lambda: None
     ros.spin = lambda _: None
     ros.create_node = lambda _: node
     qos = ModuleType("rclpy.qos")
     qos.qos_profile_sensor_data = object()
+    signals = ModuleType("rclpy.signals")
+    signals.SignalHandlerOptions = SimpleNamespace(NO=0)
     sensor = ModuleType("sensor_msgs.msg")
     sensor.Image = sensor.JointState = object
     std = ModuleType("std_msgs.msg")
@@ -563,6 +851,7 @@ def test_run_operation_routing_without_robot_or_network(monkeypatch, tmp_path, c
     for name, value in [
         ("rclpy", ros),
         ("rclpy.qos", qos),
+        ("rclpy.signals", signals),
         ("sensor_msgs.msg", sensor),
         ("std_msgs.msg", std),
     ]:
@@ -583,7 +872,16 @@ def test_run_operation_routing_without_robot_or_network(monkeypatch, tmp_path, c
             *flags,
         ]
     )
-    assert module.run(args) == 0
+    if interrupt:
+        with pytest.raises(KeyboardInterrupt):
+            module.run(args)
+        from franka_duo_tele_data.labs_action_recording import load_recording
+        archive = load_recording(output / "actions.msgpack")
+        assert archive["exit_reason"] == "KeyboardInterrupt"
+        assert len(archive["chunks"]) == 1
+        assert not archive["chunks"][0]["published"]
+    else:
+        assert module.run(args) == 0
     events = [json.loads(line)["event"] for line in (output / "trace.jsonl").read_text().splitlines()]
     assert events.count("return_to_start") == int(restore)
     assert calls.count("read_episode") == int(restore)

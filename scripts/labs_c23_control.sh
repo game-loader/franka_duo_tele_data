@@ -16,6 +16,8 @@ FR3-C23: 34D state, three 640x480 images, 32x14 delta actions.
 Default endpoint: ws://workspace.featurize.cn:50706/infer (direct connection)
 Model health must identify FastWAM-FR3-C23 / c23.
 Action reference playback: 9 Hz (30 Hz model source * speed 0.3).
+Each chunk accumulates deltas from its request state, row by row.
+Rotations compose on the left; gripper values remain absolute.
 Continuous interpolation/publication stays at 100 Hz; a chunk may have a
 settling tail after its 32/9 = 3.556 s reference duration.
 Return also uses speed 0.3: 3.333 times the base joint-return duration.

@@ -1,4 +1,4 @@
-# Labs state34 / delta14 inference client
+# Labs model inference clients
 
 `labs_client` is separate from the TMR midpoint client. It reuses
 `SmolVLAClient` and `labs_action_delta.delta14_to_absolute20`. ROS 2 and the
@@ -7,11 +7,145 @@ so ROS Humble's Python extension does not need to be rebuilt for Python 3.11.
 
 ## Unified station script
 
-The original-model entry point defaults to the direct WebSocket
-`ws://workspace.featurize.cn:38415/infer`, with health at
-`http://workspace.featurize.cn:38415/health`.
+### Labs SmolVLA
 
-On `agile@10.3.8.31`:
+`scripts/labs_smolvla_control.sh` uses `ws://100.73.14.65:8081/infer`,
+`--server-profile absolute20`, and binary `smolvla.msgpack.v1` transport.
+It sends raw state20, three 640x480 RGB images and task, and accepts finite
+`actions[H,20]` (1 <= H <= 256). The current service returns 32 rows.
+The SmolVLA wire request contains only `state`, `images`, `task` and `request_id`;
+it does not include FastWAM's `state_format` or `action_format` extensions.
+
+Input/output order is `[left xyz+rotation6D, right xyz+rotation6D,
+left gripper, right gripper]`. Each pose is link8 in that arm's own link0;
+rotation6D concatenates the first two matrix columns. No client normalization,
+inverse normalization or delta integration is performed. XYZ stays unchanged;
+rotation columns are orthogonalized and grippers thresholded at 0.5.
+
+The absolute entry points no longer request `/info` or `/health`, compare model
+names/checkpoints/policies, or send a named policy. They use the server default.
+`prediction_horizon` and `n_action_steps` are informational; execution length
+comes from `actions`. Physical format declarations, when present, must agree
+with the selected mode: normalized/delta actions or incompatible dimensions,
+layouts, units and rotation formats are rejected. Response `request_id` must
+match. Raw server metadata and predictions are preserved before adaptation;
+missing metadata does not establish how a model's training labels were made.
+
+By default all returned rows execute. `--execute-steps N` selects a prefix
+(1 <= N <= returned rows), while the entire response is still saved. Unused
+rows are discarded. At 9 Hz, 32 rows span 3.556 seconds plus settling. The site
+relay performs continuous tracking at 100 Hz and retains its physical limits.
+
+```bash
+# Dry-run, no robot publication:
+bash scripts/labs_smolvla_control.sh --infer
+# Return once, then execute complete chunks:
+bash scripts/labs_smolvla_control.sh --restore --infer --max-chunks 100 --publish --enable-robot
+```
+
+Use `--url` or `LABS_SMOLVLA_SERVER_URL` to override the endpoint. `--task`
+overrides the station dataset task. Internal control/recording retains state34;
+the model receives its first 20 entries. The default dataset supplies station
+configuration and measured episode-start states, not evidence of model training.
+
+### FastWAM and joint16 entry points
+
+`scripts/labs_control.sh` uses `absolute_joint16` with binary
+`fastwam.msgpack.v1` at
+`wss://u730748-b58d-17b41c61.bjb1.seetacloud.com:8443/infer`.
+It sends raw state16 and accepts `actions[H,16]` ordered
+`[left joint1..7, left gripper, right joint1..7, right gripper]`.
+Joint angles are absolute radians and track directly without IK or delta
+integration; grippers are thresholded at 0.5. All returned rows execute unless
+`--execute-steps N` is supplied. Raw replies remain complete in the archive.
+
+`scripts/labs_fastwam_eef_control.sh` selects `absolute20` with
+`fastwam.msgpack.v1` at the same URL, adding `state_format=rot6d_cols20` and
+`action_format=absolute20` to requests. Select this script when that server's
+default policy is EEF20. Model identity can change freely, but state dimension
+and physical action meaning must still match the chosen entry point.
+
+To change the FastWAM EEF20 server, edit `INFERENCE_URL` near the top of
+`scripts/labs_fastwam_eef_control.sh`, then run:
+
+```bash
+bash scripts/labs_fastwam_eef_control.sh --infer --task 1
+```
+
+Only the inference WebSocket address is needed; no health URL or model name
+is configured or sent. Alternatively use `LABS_FASTWAM_EEF_SERVER_URL` or
+`--url ws://HOST:PORT/infer` (the command-line option takes precedence).
+The command above is a dry-run; robot motion requires both `--publish --enable-robot`.
+
+For FastWAM, select `--task 1`, `--task 2`, `--task 3`, or `--task 4` on every
+inference run (`--task-id` is also accepted). The MessagePack request sends an
+integer `task_id` instead of `task` text. The server selects the training
+instruction and text embedding. No model name is sent. Request keys are
+`request_id`, `state`, `images`, `state_format`, `action_format`, and `task_id`.
+The run configuration and observation records preserve the selected `task_id`.
+
+| Task | Instruction |
+| --- | --- |
+| 1 | Use the left arm to place the square head into the yellow box on the left, and the right arm to place the screw into the green box on the right. |
+| 2 | Open the drawer, pick up the white charger and place it inside the drawer, then close the drawer. |
+| 3 | Stack the three bowls together. |
+| 4 | Fold the towel. |
+
+```bash
+# On the robot host; change 3 to 1, 2 or 4 for a different task:
+cd /home/agile/work/labs/data/tools/labs31_client
+bash scripts/labs_fastwam_eef_control.sh --infer --task 3 --max-chunks 100 --publish --enable-robot
+```
+
+Inference starts from the current pose. With `--restore`, the task number selects
+episode 0/frame 0 from the dataset in `configs/labs_fr3_31/task_starts.json`:
+
+| Task | Restore dataset under `/home/agile/work/labs/data/` |
+| --- | --- |
+| 1 | `lerobot/labs_fr3_link8_delta14_20260916` |
+| 2 | `lerobot_next_state20/labs_fr3_link8_next_state20_20260923` |
+| 3 | `lerobot_next_state20/labs_fr3_link8_next_state20_20260924_bowls105` |
+| 4 | `lerobot_next_state20/labs_fr3_link8_next_state20_20260924_towel98` |
+
+```bash
+# Return only to the bowls start (change 3 to 2 for drawer, 4 for towel):
+bash scripts/labs_fastwam_eef_control.sh --restore --task 3 --publish --enable-robot
+# Return once, then infer the same task:
+bash scripts/labs_fastwam_eef_control.sh --restore --infer --task 3 --max-chunks 100 --publish --enable-robot
+```
+
+Both arms return to the recorded measured joints; grippers retain their current
+opening. Pose20 datasets store these joints in `meta/measured_provenance`, whose
+checksum, first-frame pose/timestamp and URDF are checked. No action label or IK
+solution is used for return. The client records the actual restore dataset.
+
+The relay loads all configured task starts independently and advertises their
+identities, so changing tasks does not require restarting controllers. After
+updating relay code or the catalog, stop inference clients and reload once with
+`bash scripts/labs_robot_control.sh --start --restart-relay --publish --enable-robot`.
+This re-establishes a hold at the current pose; it does not perform a task return.
+For task-specific returns, `--start-episode` must remain 0. `--dataset` continues
+to select the base station contract; edit the task catalog to change task targets.
+
+`scripts/labs_joint16_control.sh` selects `absolute_joint16` for an explicit
+URL and defaults to `smolvla.msgpack.v1`. `--wire-protocol NAME` overrides the
+transport subprotocol; `--joint16-protocol NAME` remains a wrapper alias.
+Legacy named profiles remain available explicitly; the absolute wrappers now
+select the physical profiles above. C23's legacy delta14 contract is unchanged.
+
+### Connection recovery
+
+The client disables aiohttp's automatic heartbeat because no receiver runs
+while a robot chunk or restore is executing. Active requests still have a
+timeout. If a connection closes or an inference request times out before an
+action is delivered, it reconnects once and captures a fresh state and fresh
+images for a new request ID. A second failure stops the client. Server errors
+and invalid action payloads are not retried, and robot commands are never
+republished by this retry path. Timeout defaults to 60 seconds in the wrappers;
+the relay observation-age limit remains independent. Retry attempts and their
+observations are recorded along with the original action chunks and feedback.
+
+On `agile@100.90.202.124`:
 
 ```bash
 cd /home/agile/work/labs/data/tools/labs31_client
@@ -58,8 +192,8 @@ and velocity settled for 0.5 s. This supports explicit site activation without
 jumping to an old target. No inference commands are accepted while arming.
 The relay remains alive after the client exits to hold the final joint target;
 interrupting the client does not cancel an accepted chunk. Reused relays keep
-the dataset/episode/configuration with which they were started; a mismatched
-return identity fails rather than silently selecting another target.
+the dataset/episode/configuration and task-start catalog loaded at startup;
+a mismatched return identity fails rather than silently selecting another target.
 The script does not activate controllers or take over teleoperation topics:
 both arms must already have the follower and state broadcasters active, with
 exclusive destination ownership. Both followers were explicitly activated on 2026-09-19 after establishing
@@ -99,8 +233,8 @@ advance at **9 Hz**, giving 32/9 = 3.556 seconds of reference time per chunk.
 Ruckig interpolation and relay publication remain at 100 Hz, with a settling
 tail when needed. Grippers follow the same slowed reference timeline. The
 trace records `action_rate_hz=30`, `speed=0.3`, `execution_rate_hz=9` and the
-unmodified server health. It retains the user-confirmed initial-observation
-reference for every delta row; it does not cumulatively integrate the chunk.
+unmodified server health. It accumulates every delta onto the previous target,
+starting from the request observation, just like the legacy FastWAM delta14 profile.
 
 This script shares the existing relay, return tolerance and robot gates. It
 checks the C23 identity before inference/return in combined mode. It does not
@@ -128,32 +262,52 @@ Live observations use the head image's header timestamp. Wrist tolerance is
 The client subscribes to the same `measured_joint_states` topics used by the
 Labs export. It never changes the raw recorder, topics or stored MCAP messages.
 
-**The agreed inference contract is that ALL H rows reference the observation
-sent with that request.** For every row independently:
+**The legacy FastWAM delta14 profile (`labs`) and C23 accumulate each delta14 chunk.**
+The current FastWAM entry point instead uses absolute joint16 as described above.
+SmolVLA uses absolute pose20 targets as described above; joint16 uses absolute
+joints as described in `LABS_JOINT16_CLIENT.md`.
+For each arm, with the initial pose as `p[-1], R[-1]`:
 
-```python
-references = np.broadcast_to(request_state34, (H, 34))
-targets20 = delta14_to_absolute20(actions14, references)
+```text
+p[k] = p[k-1] + delta_xyz[k]
+R[k] = Exp(delta_rotvec[k]) @ R[k-1]
 ```
 
-Positions use `p_request + delta_xyz`, rotations use
-`Exp(delta_rotvec) @ R_request`. Grippers are absolute binary open/closed values:
-raw model predictions are mapped with `open = prediction >= 0.5`, matching the
-Labs labels. Predictions outside [-0.1,1.1] are rejected as a scale error. This
-allows modest endpoint overshoot from the regression model without clipping
-Cartesian deltas. Raw predictions and `binary_open_ge_0.5_v1` are retained in
-the trace; the existing bidirectional conversion functions remain unchanged.
-There is no cumulative sum. Every row is retained, in order, for execution.
-The next request captures an observation only after the complete chunk has
-finished and the relay reports holding.
+Translation remains in the arm's link0 axes; it is not rotated into tool axes.
+Rotation vectors are composed as rotations, not added as vectors. Each new
+chunk starts from its newly measured request state, with no integration state
+carried between requests. Every returned row is retained and converted to an
+absolute20 target before the complete chunk is planned and continuously tracked.
+The next observation is captured after the chunk finishes and the relay holds.
 
-This inference convention does not relabel the dataset: its rows reference
-their respective same-row measured states. The deployed server's health text
-currently says "each row is one incremental dataset step". The user explicitly
-confirmed interpreting its entire returned chunk against the initial state
-anyway. The trace preserves that original server metadata and records the
-user-confirmed `request_observation` interpretation separately. The client
-never cumulatively sums deltas or fabricates future measured states.
+Grippers remain absolute binary open/closed values, using `prediction >= 0.5`.
+Legacy delta14 FastWAM/C23 reject predictions outside [-0.1,1.1]; SmolVLA thresholds finite
+gripper predictions directly. Cartesian deltas are not normalized or clipped.
+Existing Cartesian step/extent, IK and joint checks still apply to the full
+accumulated trajectory.
+The whole-chunk seed-relative rotation limit is now pi radians (180 degrees,
+the full SO(3) principal-angle range), with 1e-6 numerical tolerance. This is
+not a cap on the sum of rotation travel: a smooth sequence may turn farther.
+Per-step rotation remains limited to 0.35 rad; translation limits remain
+0.04 m per step and 0.60 m from the chunk seed. Joint bounds, IK checks and
+continuous tracker speed/acceleration limits remain in force.
+
+`chunk_reference=request_observation` identifies the integration seed.
+`chunk_integration=cumulative_link0_delta14_v1` identifies the execution rule in
+commands, configuration records, trace events and terminal chunk summaries.
+Older recordings without this integration field used independent offsets from
+the fixed request pose; inspect their saved `command.targets` for the exact
+trajectory rather than reinterpreting their raw deltas with today's decoder.
+The relay continues to consume absolute20 targets, so this client-only change
+does not require restarting an existing relay or follower controllers.
+
+This corrects the earlier misunderstanding of the user's requested cumulative
+execution. It does not modify offline labels or dataset replay: those deltas
+remain relative to each row's own measured state. They are not strictly
+successive-target increments. Accumulation implements the requested execution
+rule, not a claim that existing checkpoints now reproduce demonstration paths.
+The server's `no_cumulative_delta=true` describes its unaccumulated wire output;
+client execution integration is recorded separately and raw metadata is retained.
 
 ## Existing WebSocket transport
 
@@ -183,7 +337,7 @@ described above. The old TMR client still uses `smolvla.msgpack.v1`.
 
 ## Install and verify without motion
 
-On `agile@10.3.8.31`, use a separate working directory and the system Python
+On `agile@100.90.202.124`, use a separate working directory and the system Python
 matching ROS Humble:
 
 ```bash
@@ -210,7 +364,7 @@ when subsequent numeric validation rejects the model response.
 
 The installed station copy is
 `/home/agile/work/labs/data/tools/labs31_client`. Its verified service URL is
-`ws://workspace.featurize.cn:38415/infer`.
+`ws://workspace.featurize.cn:37388/infer`.
 See [the validation record](LABS_CLIENT_VALIDATION_20260919.md).
 
 ## Site relay and explicitly enabled execution
@@ -282,7 +436,9 @@ After the last reference row the tracker decelerates and converges to its exact
 final commanded joint target. The client waits for this tail and measured
 settling before requesting another chunk. Completion uses the authorized
 0.05 rad position tolerance, measured velocity <=0.02 rad/s and a continuous
-0.5 s dwell for both return and policy motion. Startup arming retains its
+0.5 s dwell for both return and policy motion. Gripper opening does not gate
+completion: closing on an object need not reach zero opening. Gripper commands
+and fresh-feedback checks remain active. Startup arming retains its
 separate 0.01 rad hold tolerance. The status/trace reports reference duration,
 command duration, peak velocity/acceleration and maximum reference lag. The
 precomputed command duration must be <=90 s; controller settling adds time.
@@ -291,9 +447,11 @@ precomputed command duration must be <=90 s; controller settling adds time.
 
 With `--restore --infer` (or the legacy default), before the first inference
 request the client returns the arms once to the
-selected `--start-episode` (default 0), frame 0. It reads **measured joints
-`observation.state[20:34]`**, not action labels or an IK solution for the saved
-end-effector poses. The state layout, FK and joint limits are validated. Both
+selected `--start-episode` (default 0), frame 0. FastWAM task-specific returns
+always select episode 0/frame 0 from that task's catalog dataset. It reads
+**measured joints** from `observation.state[20:34]` or, for pose20 exports, the
+matching hashed `meta/measured_provenance` sidecar, not action labels or an IK
+solution for the saved end-effector poses. The state layout, FK and joint limits are validated. Both
 client and relay load the dataset independently and compare a content hash of
 the episode, frame, state and URDF hashes. Missing/duplicate first frames fail.
 
@@ -384,3 +542,74 @@ The extra 0.002 rad displacement comparison between the beginning and end of
 IK planning was removed at the user's request. No replacement planning-drift
 threshold was added. The existing command admission, feedback freshness,
 stationary-start, trajectory-limit and physical tracking checks still apply.
+
+## Save every server action chunk and inspect tracking
+
+Every model entry point automatically writes `actions.msgpack` inside the
+printed run directory, on normal exit, Ctrl+C or an exception. `--output PATH`
+selects that directory (it must not already exist). No extra recording flag
+is needed. The portable `labs_inference_recording_v1` bundle includes:
+
+- Every original server reply, before validation or gripper thresholding,
+  including replies rejected by the client; its matching 34D request state,
+  image references/source timestamps, task and receipt time.
+- Validated absolute20 targets, command/request IDs, source/playback rate,
+  model metadata and URDF text/hashes. All chunk rows use their own saved
+  request observation; never reconstruct later chunks from the first state
+  of the entire run or cumulatively sum delta actions.
+- Whether the command was published, completed, faulted or remains unconfirmed.
+  Published does not mean completed. Dry-run chunks remain `not_published`.
+- Approximately 20 Hz relay status and fresh actual joint positions while
+  publishing, keyed to command ID; sampled maximum/RMS joint error. Completed
+  chunks with a fresh holding sample also include final measured-vs-model
+  endpoint position and rotation error for each arm.
+
+The relay status provides its last published joint target. It is paired with
+latest measured feedback when received, with source/receipt timestamps saved.
+These are asynchronous samples, not exact 100 Hz pairs; use their trends and
+endpoint error for diagnosis, not as a precise reconstruction of every servo
+tick. No extra command-topic subscriber is created. Missing/stale feedback is
+recorded as missing, never as zero error or a successful endpoint.
+
+The first Ctrl+C stops new inference requests and immediately exports a
+snapshot. If a chunk has already been published, the client continues receiving
+feedback until its matching completion acknowledgment or an error/120 s timeout,
+then exports the final bundle. A second Ctrl+C exits that wait; the relay may
+still finish the accepted chunk. Unconfirmed execution stays explicitly marked.
+Raw replies and publication/completion events are flushed and fsynced to
+`actions.journal.msgpack` as they arrive, so a process crash does not require
+waiting for the final export to retain previously received chunks.
+
+```bash
+# Actual inference plus automatic recording in this chosen new directory:
+bash scripts/labs_control.sh --restore --infer --max-chunks 100 \
+  --publish --enable-robot --output outputs/fastwam_recording_01
+
+# Print per-chunk results and create an offline interactive playback page:
+bash scripts/labs_inspect_actions.sh outputs/fastwam_recording_01/actions.msgpack \
+  --html outputs/fastwam_recording_01/replay.html
+
+# After abnormal termination, rebuild the portable file from the journal:
+# Run only after that inference process has exited.
+bash scripts/labs_inspect_actions.sh outputs/fastwam_recording_01 --recover
+```
+
+Open `replay.html` in a browser. Select the chunk, arm and XYZ axis, then play
+or scrub through the model targets, recorded relay targets and measured FK
+positions; a separate plot shows all seven joint errors. Model and execution
+curves have separate time origins (reference start vs first execution sample).
+The viewer runs offline and does not move the robot. The archive retains all
+raw 14D values and reconstructed targets for subsequent robot replay tooling.
+It includes URDF geometry for FK; camera bytes remain in the observation folders.
+
+Python access:
+
+```python
+import msgpack
+with open("outputs/fastwam_recording_01/actions.msgpack", "rb") as f:
+    run = msgpack.unpack(f, raw=False)
+for chunk in run["chunks"]:
+    actions = chunk["raw_response"]["actions"]
+    reference_state = chunk["observation"]["state"]
+    print(chunk["index"], chunk["execution"], chunk["summary"])
+```

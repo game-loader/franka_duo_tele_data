@@ -8,6 +8,10 @@ import time
 from pathlib import Path
 
 
+class InferenceConnectionError(ConnectionError):
+    """No action was delivered to the caller; retry only with a fresh observation."""
+
+
 class SmolVLAClient:
     subprotocol = "smolvla.msgpack.v1"
 
@@ -23,17 +27,25 @@ class SmolVLAClient:
 
         self.session = ClientSession()
         try:
-            self.ws = await self.session.ws_connect(
-                self.url,
-                protocols=(self.subprotocol,),
-                heartbeat=20,
-                compress=0,
-                max_msg_size=16 * 1024 * 1024,
-            )
+            await self.reconnect()
         except BaseException:
             await self.session.close()
             raise
         return self
+
+    async def reconnect(self):
+        if self.ws is not None:
+            await self.ws.close()
+        # No background receiver runs during robot motion/restore. aiohttp's
+        # heartbeat cannot consume pong frames then, so it can close a healthy
+        # connection after a long hold. Request timeouts bound active I/O.
+        self.ws = await asyncio.wait_for(self.session.ws_connect(
+            self.url, protocols=(self.subprotocol,), heartbeat=None, compress=0,
+            max_msg_size=16 * 1024 * 1024,
+        ), timeout=self.timeout)
+        if self.ws.protocol != self.subprotocol:
+            await self.ws.close()
+            raise RuntimeError(f"Server must negotiate {self.subprotocol}")
 
     async def __aexit__(self, *args):
         try:
@@ -43,18 +55,23 @@ class SmolVLAClient:
             if self.session is not None:
                 await self.session.close()
 
+    def build_request(self, state, images, task, request_id):
+        return {"state": state, "images": images, "task": task, "request_id": request_id}
+
     async def infer(self, state: list[float], images: dict[str, bytes], task="pick cup and bowl") -> dict:
         """Reuse this connection. Images are JPEG/PNG bytes, not raw OpenCV BGR buffers."""
         import msgpack
-        from aiohttp import WSMsgType
+        from aiohttp import ClientConnectionError, WSMsgType
 
-        if self.ws is None or self.ws.closed:
+        if self.session is None or self.session.closed or self.ws is None:
             raise RuntimeError("Open the client with 'async with SmolVLAClient(...)'")
+        if self.ws.closed:
+            raise InferenceConnectionError("WebSocket closed before inference")
         if self._lock.locked():
             raise RuntimeError("Wait for the pending inference before sending a new observation")
         async with self._lock:
             request_id = str(time.time_ns())
-            payload = {"state": state, "images": images, "task": task, "request_id": request_id}
+            payload = self.build_request(state, images, task, request_id)
             try:
                 async def exchange():
                     await self.ws.send_bytes(msgpack.packb(payload, use_bin_type=True, use_single_float=True))
@@ -62,11 +79,16 @@ class SmolVLAClient:
 
                 # Humble's host-managed rclpy uses Python 3.10 (no asyncio.timeout).
                 message = await asyncio.wait_for(exchange(), timeout=self.timeout)
+                if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING, WSMsgType.ERROR):
+                    raise InferenceConnectionError(f"WebSocket disconnected: {message.type}")
                 if message.type != WSMsgType.BINARY:
                     raise RuntimeError(f"WebSocket closed or returned an unexpected frame: {message.type}")
                 result = msgpack.unpackb(message.data, raw=False)
                 if result.get("request_id") != request_id:
                     raise RuntimeError("Mismatched response request_id; reconnect before retrying")
+            except (ClientConnectionError, ConnectionError, asyncio.TimeoutError) as exc:
+                await self.ws.close()
+                raise InferenceConnectionError(f"Inference transport failed: {type(exc).__name__}: {exc}") from exc
             except BaseException:
                 # A late reply after a timeout/cancellation must not become the next request's action.
                 await self.ws.close()

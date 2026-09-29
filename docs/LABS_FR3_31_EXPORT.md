@@ -1,4 +1,4 @@
-# labs FR3 station 10.3.8.31
+# labs FR3 station 100.90.202.124
 
 The repository now uses only **rot6d_columns**. For a rotation R, encode
 `[R00,R10,R20,R01,R11,R21]`. Existing row-encoded datasets/checkpoints must
