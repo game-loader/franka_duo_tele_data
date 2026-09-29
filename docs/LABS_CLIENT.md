@@ -434,9 +434,12 @@ caused by the impedance controller's measured steady-state error.
 
 After the last reference row the tracker decelerates and converges to its exact
 final commanded joint target. The client waits for this tail and measured
-settling before requesting another chunk. Completion uses the authorized
-0.05 rad position tolerance, measured velocity <=0.02 rad/s and a continuous
-0.5 s dwell for both return and policy motion. Gripper opening does not gate
+settling before requesting another chunk. Policy and replay completion require
+measured velocity <=0.02 rad/s continuously for 0.5 s, with no endpoint position
+tolerance. A persistent position offset therefore does not block the next
+chunk. If the arms do not stop within 3 s after the command trajectory ends,
+the relay faults. A recorded-start return still verifies its 0.05 rad position
+tolerance before acknowledging arrival at that start. Gripper opening does not gate
 completion: closing on an object need not reach zero opening. Gripper commands
 and fresh-feedback checks remain active. Startup arming retains its
 separate 0.01 rad hold tolerance. The status/trace reports reference duration,
@@ -518,9 +521,9 @@ if the client exits, then the relay holds the final target.
 At the user's explicit request, recorded replay and both model clients share:
 0.8 rad/s velocity, 2 rad/s² acceleration, 20 rad/s³ jerk and 0.3 rad maximum
 command-to-reference lag. Actual-to-command tracking error still trips at
-0.15 rad, and URDF joint travel bounds remain enforced. Completion uses the
-approved 0.05 rad joint-position tolerance, velocity <=0.02 rad/s and a 0.5 s
-dwell. Recorded trajectory extent is checked against each own row instead of
+0.15 rad, and URDF joint travel bounds remain enforced. Policy and replay
+completion require velocity <=0.02 rad/s and a 0.5 s dwell, without an endpoint
+joint-position tolerance. Recorded trajectory extent is checked against each own row instead of
 applying one short inference chunk's global extent cap to the entire episode.
 Adjacent-step and IK jump checks remain in place.
 

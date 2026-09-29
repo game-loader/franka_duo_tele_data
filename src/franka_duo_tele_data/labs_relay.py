@@ -575,9 +575,12 @@ def run(args):
                         if complete:
                             state["phase"] = "holding"
                     if ended and state["phase"] == "executing":
-                        # Grippers can stop on a grasped object. Chunk completion
-                        # depends only on arm position and velocity settling.
-                        close = return_at_goal(plan, actual, measured_velocity())
+                        # Policy/replay endpoints allow steady-state position error.
+                        # A recorded-start return still verifies that pose before
+                        # acknowledging completed_start_identity.
+                        returning = state["active_start_identity"] is not None
+                        velocity = measured_velocity()
+                        close = return_at_goal(plan, actual, velocity) if returning else stationary(velocity)
                         state["settled"], complete = settle_update(
                             state["settled"], close, time.monotonic(), 0.5
                         )
@@ -585,7 +588,9 @@ def run(args):
                             state["phase"] = "holding"
                             state["completed_start_identity"] = state["active_start_identity"]
                         if elapsed > plan.duration + 3 and state["phase"] != "holding":
-                            raise RuntimeError("Robot did not settle at chunk endpoint")
+                            if returning:
+                                raise RuntimeError("Robot did not settle at recorded return target")
+                            raise RuntimeError("Robot did not stop at chunk endpoint")
             except Exception as exc:
                 # DDS discovery/missing feedback before the first output is a
                 # readiness condition; faults latch once a hold/trajectory exists.
