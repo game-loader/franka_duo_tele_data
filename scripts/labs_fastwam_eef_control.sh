@@ -27,7 +27,7 @@ The existing IK and site follower relay continuously track the complete chunk.
 9 Hz reference (H/9 seconds), 100 Hz tracking, grippers thresholded at 0.5.
 --restore returns to the selected task's episode 0/frame 0 measured arm joints.
 Task datasets are configured in configs/labs_fr3_31/task_starts.json.
-Grippers keep their current opening. --infer starts at the current pose.
+Restore opens both grippers while returning. --infer starts at the current pose.
 Dry-run by default; motion requires BOTH --publish --enable-robot.
 Tasks (sent as integer task_id; the server selects instruction/text embeddings):
   1  Use the left arm to place the square head into the yellow box on the left, and the right arm to place the screw into the green box on the right.

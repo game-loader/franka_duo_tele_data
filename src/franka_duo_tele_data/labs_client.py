@@ -341,6 +341,7 @@ def start_command(start_state, contract, episode, *, speed=0.3, task_id=None):
     return {
         "schema": RETURN_SCHEMA,
         "mode": "return_to_start",
+        "gripper_targets": [1.0, 1.0],
         "command_id": uuid.uuid4().hex,
         "created_ns": time.time_ns(),
         "model_hashes": contract.model_hashes,
@@ -358,6 +359,8 @@ async def return_before_inference(command, *, publish, wait_hold, record):
     if publish is None:
         return
     ready = await wait_hold()
+    if command["schema"] not in ready.get("supported_command_schemas", []):
+        raise RuntimeError("Reload the Labs relay to support restore with both grippers open")
     if command.get("task_id") is not None and (
         ready.get("task_start_identities", {}).get(str(command["task_id"])) != command["start_identity"]
     ):
@@ -392,6 +395,7 @@ def restore_preview(args, contract, start_state, *, dataset=None):
         "published": False,
         "dataset": str(dataset or args.dataset),
         "target_joints": start_state[20:].tolist(),
+        "target_grippers": command["gripper_targets"],
     }
     (args.output / "trace.jsonl").write_text(json.dumps(record, allow_nan=False) + "\n")
     print(
@@ -402,6 +406,7 @@ def restore_preview(args, contract, start_state, *, dataset=None):
                 "task_id": args.task_id,
                 "dataset": str(dataset or args.dataset),
                 "target_joints": start_state[20:].tolist(),
+                "target_grippers": command["gripper_targets"],
                 "output": str(args.output),
             }
         )

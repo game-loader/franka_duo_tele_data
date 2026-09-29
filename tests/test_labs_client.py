@@ -608,7 +608,10 @@ def test_return_exact_recorded_joints_without_ik_and_bounded_motion(contract):
     command = start_command(target, contract, 7)
     admit_command(command, contract, initial)
     plan = build_return_plan(command, contract, initial, np.zeros(14), target, 7)
-    assert plan.preserve_grippers
+    assert not plan.preserve_grippers
+    assert command["gripper_targets"] == [1.0, 1.0]
+    for elapsed in (0, plan.duration / 2, plan.duration, plan.duration + 1):
+        np.testing.assert_array_equal(plan.sample(elapsed)[1], [1.0, 1.0])
     np.testing.assert_array_equal(plan.sample(plan.duration)[0], target[20:])
     distance = np.abs(target[20:] - initial)
     assert np.max(1.875 * distance / plan.duration) <= 0.25
@@ -627,6 +630,9 @@ def test_return_exact_recorded_joints_without_ik_and_bounded_motion(contract):
     for velocity in ([], np.full(14, np.nan), np.full(14, 0.03)):
         with pytest.raises(ValueError, match="stationary"):
             build_return_plan(command, contract, initial, velocity, target, 7)
+    for grippers in (None, [0, 0], [1, 0]):
+        with pytest.raises(ValueError, match="fully open"):
+            build_return_plan({**command, "gripper_targets": grippers}, contract, initial, np.zeros(14), target, 7)
 
 
 def test_return_time_scaling_preserves_path_and_rejects_invalid_or_legacy_commands(contract):
@@ -659,11 +665,12 @@ def test_return_time_scaling_preserves_path_and_rejects_invalid_or_legacy_comman
             build_return_plan({**slow_command, "speed": speed}, contract, initial, np.zeros(14), target, 0)
     with pytest.raises(ValueError, match="execution_rate_hz"):
         build_return_plan({**slow_command, "execution_rate_hz": 30}, contract, initial, np.zeros(14), target, 0)
-    legacy = {**slow_command, "schema": "labs_fr3_episode_joint_return_v1"}
-    with pytest.raises(ValueError, match="Incompatible"):
-        admit_command(legacy, contract, initial)
-    with pytest.raises(ValueError, match="does not match"):
-        build_return_plan(legacy, contract, initial, np.zeros(14), target, 0)
+    for version in (1, 2):
+        legacy = {**slow_command, "schema": f"labs_fr3_episode_joint_return_v{version}"}
+        with pytest.raises(ValueError, match="Incompatible"):
+            admit_command(legacy, contract, initial)
+        with pytest.raises(ValueError, match="does not match"):
+            build_return_plan(legacy, contract, initial, np.zeros(14), target, 0)
     with pytest.raises(ValueError, match="more than 90"):
         build_return_plan(
             start_command(target, contract, 0, speed=0.01), contract, initial, np.zeros(14), target, 0
@@ -709,7 +716,8 @@ def test_startup_ack_failure_blocks_inference_and_dry_run_does_not_publish(contr
                 if fail:
                     raise TimeoutError("not settled")
                 events.append("settled")
-            return {"completed_start_identity": command["start_identity"]}
+            return {"completed_start_identity": command["start_identity"],
+                    "supported_command_schemas": [command["schema"]]}
 
         async def session():
             await return_before_inference(

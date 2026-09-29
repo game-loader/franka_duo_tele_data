@@ -46,7 +46,7 @@ bash scripts/labs_joint16_control.sh --restore --publish --enable-robot
 脚本不会把 joint16 请求误发给现有 delta14 服务。默认数据集：
 `/home/agile/work/labs/data/lerobot_joint16/labs_fr3_joint16_20260916`，可用
 `LABS_JOINT16_DATASET` 或 `--dataset` 覆盖。关节回零使用该 episode 首行**实测**关节，
-保持现有夹爪状态，不以 action 目标冒充初始 state。
+回位期间同时打开两侧夹爪（目标开度 1.0），不以 action 目标冒充初始 state。
 
 ## 接口
 

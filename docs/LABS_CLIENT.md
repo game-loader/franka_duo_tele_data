@@ -114,8 +114,8 @@ bash scripts/labs_fastwam_eef_control.sh --restore --task 3 --publish --enable-r
 bash scripts/labs_fastwam_eef_control.sh --restore --infer --task 3 --max-chunks 100 --publish --enable-robot
 ```
 
-Both arms return to the recorded measured joints; grippers retain their current
-opening. Pose20 datasets store these joints in `meta/measured_provenance`, whose
+Both arms return to the recorded measured joints while both grippers are
+commanded fully open (1.0). Pose20 datasets store these joints in `meta/measured_provenance`, whose
 checksum, first-frame pose/timestamp and URDF are checked. No action label or IK
 solution is used for return. The client records the actual restore dataset.
 
@@ -156,7 +156,7 @@ bash scripts/labs_control.sh --restore
 # Real camera observations + one model response, without motion:
 bash scripts/labs_control.sh --infer
 
-# Actual arm return only (preserves grippers):
+# Return arms to the start and open both grippers:
 bash scripts/labs_control.sh --restore --publish --enable-robot
 
 # Infer and execute from the current pose, without another return:
@@ -458,7 +458,7 @@ solution for the saved end-effector poses. The state layout, FK and joint limits
 client and relay load the dataset independently and compare a content hash of
 the episode, frame, state and URDF hashes. Missing/duplicate first frames fail.
 
-The separate `labs_fr3_episode_joint_return_v2` command uses the relay's fresh
+The separate `labs_fr3_episode_joint_return_v3` command uses the relay's fresh
 joint feedback and does not depend on cameras or invoke IK. Both arms follow
 one synchronized quintic trajectory. The base duration is bounded to 0.25 rad/s
 and 0.5 rad/s², then divided by the requested `speed`. Return has no dataset
@@ -466,11 +466,15 @@ frame clock: its `execution_rate_hz=30*speed` records the shared time-scale
 choice, while the actual joint target stream remains 100 Hz. At the default
 speed 0.3, the return takes 3.333 times the base duration, with velocity bounded
 to 0.075 rad/s and acceleration to 0.045 rad/s². The command explicitly carries
-both timing fields; the version prevents an older relay silently ignoring the
-slower return. Deploy client and relay together. The status records the base
+both timing fields and `gripper_targets: [1.0, 1.0]`; the version prevents an
+older relay silently preserving the grippers. Deploy client and relay together.
+The client checks relay support before publishing the return. The status records the base
 and scaled durations, selected speed and scaled dynamic limits.
-The return preserves the physical gripper opening and publishes no gripper
-commands. Joint feedback must include fresh velocities, with every joint at
+From the first return tick, the relay publishes fully open targets for both
+grippers alongside the arm trajectory, and continues holding them open after
+return until another command is accepted. Dry-run previews and return records
+include these gripper targets. Startup/recovery holds preserve the current
+gripper opening. Joint feedback must include fresh velocities, with every joint at
 or below 0.02 rad/s before starting. Completion requires every joint within
 0.05 rad of its recorded target and velocity at or below 0.02 rad/s continuously
 for 0.5 s, after the trajectory ends. A failure/timeout prevents inference.

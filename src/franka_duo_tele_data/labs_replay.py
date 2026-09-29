@@ -132,8 +132,10 @@ def run(args):
             raise TimeoutError(f"Replay did not finish: {status}")
 
         try:
-            wait(timeout=10)
+            ready = wait(timeout=10)
             reset = start_command(episode.states[0], contract, args.episode, speed=args.rate / 30)
+            if reset["schema"] not in ready.get("supported_command_schemas", []):
+                raise RuntimeError("Reload the Labs relay to support restore with both grippers open")
             publisher.publish(String(data=json.dumps(reset)))
             record({"event": "published_restore", "command": reset})
             complete = wait(reset["command_id"])

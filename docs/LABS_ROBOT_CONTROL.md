@@ -17,7 +17,7 @@ bash scripts/labs_robot_control.sh --recover --publish --enable-robot
 ```
 
 先退出推理和回放客户端。脚本不发送策略动作、不回 episode 起点、不打开夹爪。
-需要回初始位置时，再使用推理脚本的 `--restore`。
+需要回初始位置时，再使用推理脚本的 `--restore`；回位期间会同时打开两侧夹爪。
 FastWAM 用 `--restore --task 1/2/3/4` 选择任务。每个任务读取自身数据集的
 episode 0/frame 0 实测双臂关节，映射见 `configs/labs_fr3_31/task_starts.json`。
 relay 启动时同时读取四个起点，正常切换任务不需要重启 controller。

@@ -21,7 +21,7 @@ from .ros_utils import _stamp_ns, image_msg_to_rgb
 SIDES = ("left", "right")
 COMMAND_TOPIC = "/franka_duo/labs/action"
 STATUS_TOPIC = "/franka_duo/labs/status"
-RETURN_SCHEMA = "labs_fr3_episode_joint_return_v2"
+RETURN_SCHEMA = "labs_fr3_episode_joint_return_v3"
 COMMAND_SCHEMA = "labs_fr3_link8_absolute20_command_v1"
 STATUS_SCHEMA = "labs_fr3_relay_status_v1"
 CHUNK_REFERENCE = "request_observation"

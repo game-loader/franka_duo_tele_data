@@ -150,7 +150,7 @@ def controller_set_ready(active, *, allow_inactive=False):
 
 
 def build_return_plan(command, contract, measured, velocity, start_state, start_episode):
-    """Reach the recorded q, including arm redundancy; never solve Cartesian IK."""
+    """Reach the recorded q and open both grippers; never solve Cartesian IK."""
     if (
         command.get("schema") != RETURN_SCHEMA
         or command.get("mode") != "return_to_start"
@@ -159,6 +159,8 @@ def build_return_plan(command, contract, measured, velocity, start_state, start_
         or command.get("start_identity") != start_identity(start_state, start_episode, contract)
     ):
         raise ValueError("Return target does not match configured dataset episode start")
+    if command.get("gripper_targets") != [1.0, 1.0]:
+        raise ValueError("Return requires both gripper targets fully open: [1.0, 1.0]")
     initial = np.asarray(measured, dtype=float)
     target = contract.validate_state(start_state)[20:].astype(float)
     bounds = np.concatenate([contract.fk[s].bounds for s in SIDES])
@@ -188,11 +190,12 @@ def build_return_plan(command, contract, measured, velocity, start_state, start_
         raise ValueError("Return needs more than 90 s")
     return JointPlan(
         np.stack([initial, target]),
-        np.zeros((1, 2)),
+        np.ones((1, 2)),
         np.array([duration]),
-        preserve_grippers=True,
+        preserve_grippers=False,
         diagnostics={
             "tracking": "synchronized_quintic_return_v2",
+            "gripper_targets": [1.0, 1.0],
             "speed": speed,
             "execution_rate_hz": 30 * speed,
             "base_duration_s": base_duration,

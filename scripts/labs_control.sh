@@ -16,6 +16,7 @@ Usage: bash scripts/labs_control.sh --restore [--infer] [options]
        bash scripts/labs_control.sh --infer [options]
 
   --restore    Return both arms to --start-episode's first measured pose.
+               Open both grippers while returning.
   --infer      Run inference from the current pose; no implicit restore.
   Both flags   Return once, wait for arrival, then start inference.
 
